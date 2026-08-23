@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FileRow } from "./FileRow";
 import { useStore } from "./store";
+import { checkForUpdates } from "./updateCheck";
 import type { Preset, Summary, VideoFile } from "./store";
 
 const PRESETS: { id: Preset; hint: string }[] = [
@@ -19,6 +20,7 @@ export default function App() {
 
   useEffect(() => {
     invoke<string>("check_ffmpeg").catch((e) => useStore.getState().setFfmpegError(String(e)));
+    void checkForUpdates();
     const subs = [
       listen<{ index: number }>("file:start", (e) => useStore.getState().fileStart(e.payload.index)),
       listen<{ index: number; percent: number }>("file:progress", (e) =>

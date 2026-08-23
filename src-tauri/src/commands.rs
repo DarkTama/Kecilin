@@ -159,8 +159,12 @@ pub(crate) fn build_ffmpeg_args(
 }
 
 fn ffmpeg(app: &AppHandle) -> Result<tauri_plugin_shell::process::Command, String> {
+    // Resolved as <exe_dir>/ffmpeg.exe — the WHOLE argument is joined onto the
+    // exe dir, so it must be the bare name, not "binaries/ffmpeg" (that would
+    // look for <exe_dir>/binaries/ffmpeg.exe, which exists nowhere: tauri-build
+    // and the bundler both lay the sidecar flat next to the app exe).
     app.shell()
-        .sidecar("binaries/ffmpeg")
+        .sidecar("ffmpeg")
         .map_err(|e| format!("ffmpeg sidecar unavailable: {e} (run scripts/fetch-binaries.ps1)"))
 }
 
