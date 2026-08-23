@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: #020617;
+  color: #f1f5f9;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+}
+
+/* Text inputs stay selectable even with the app-wide user-select: none. */
+input {
+  user-select: text;
+}

@@ -1,0 +1,21 @@
+# --- Node / frontend ---
+node_modules/
+dist/
+.vite/
+*.local
+
+# --- Rust / Tauri ---
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# --- Bundled binaries (large; fetched via scripts/fetch-binaries.ps1) ---
+src-tauri/binaries/
+
+# --- Logs ---
+*.log
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
