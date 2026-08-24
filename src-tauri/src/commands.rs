@@ -73,6 +73,15 @@ pub struct BatchItem {
     /// multi-part split (`_part1`, `_part2`, … outputs).
     #[serde(default)]
     pub trims: Vec<Trim>,
+    /// None = keep audio as-is; "mute" = drop the track; "75"/"50"/"25" = volume.
+    #[serde(default)]
+    pub audio: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct OutputFile {
+    path: String,
+    size: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -91,6 +100,7 @@ struct FileDone {
     index: usize,
     ok: bool,
     error: Option<String>,
+    outputs: Vec<OutputFile>,
 }
 
 #[derive(Serialize, Clone)]
@@ -128,11 +138,14 @@ fn push_strs(args: &mut Vec<String>, xs: &[&str]) {
 /// Build the exact ffmpeg invocation from compress.bat (see docs/ARCHITECTURE.md).
 /// Trim adds `-ss` before `-i` (fast input seek) and `-t` after it; the
 /// `-progress pipe:1 -nostats` pair only affects reporting, not the encode.
+/// `audio`: None/unknown = keep as the script does; "mute" drops the audio
+/// track entirely; "75"/"50"/"25" scale the volume.
 pub(crate) fn build_ffmpeg_args(
     input: &str,
     output: &str,
     p: &Preset,
     trim: Option<&Trim>,
+    audio: Option<&str>,
 ) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into()];
     if let Some(t) = trim {
@@ -144,8 +157,12 @@ pub(crate) fn build_ffmpeg_args(
     }
     let vf = format!("scale=-2:{}:flags=lanczos", p.height);
     let crf = p.crf.to_string();
+    let mute = audio == Some("mute");
+    push_strs(&mut a, &["-map", "0:v:0"]);
+    if !mute {
+        push_strs(&mut a, &["-map", "0:a?"]);
+    }
     push_strs(&mut a, &[
-        "-map", "0:v:0", "-map", "0:a?",
         "-vf", &vf,
         "-c:v", "libx264", "-preset", "slow", "-profile:v", "high",
         "-level", p.level, "-pix_fmt", "yuv420p",
@@ -153,7 +170,22 @@ pub(crate) fn build_ffmpeg_args(
         "-g", "120", "-keyint_min", "60", "-sc_threshold", "40",
         "-bf", "3", "-refs", "4", "-rc-lookahead", "40",
         "-x264-params", "aq-mode=3:aq-strength=0.8",
-        "-c:a", "aac", "-q:a", "2", "-ar", "48000", "-ac", "2",
+    ]);
+    if mute {
+        push_strs(&mut a, &["-an"]);
+    } else {
+        let vol = match audio {
+            Some("75") => Some("0.75"),
+            Some("50") => Some("0.5"),
+            Some("25") => Some("0.25"),
+            _ => None,
+        };
+        if let Some(v) = vol {
+            push_strs(&mut a, &["-af", &format!("volume={v}")]);
+        }
+        push_strs(&mut a, &["-c:a", "aac", "-q:a", "2", "-ar", "48000", "-ac", "2"]);
+    }
+    push_strs(&mut a, &[
         "-movflags", "+faststart",
         "-progress", "pipe:1", "-nostats",
         output,
@@ -430,9 +462,9 @@ async fn run_batch(
         }
         let _ = app.emit("file:start", FileStart { index });
         match convert_one(&app, item, preset, out_dir.as_deref(), index).await {
-            Ok(()) => {
+            Ok(outputs) => {
                 converted += 1;
-                let _ = app.emit("file:done", FileDone { index, ok: true, error: None });
+                let _ = app.emit("file:done", FileDone { index, ok: true, error: None, outputs });
             }
             Err(e) => {
                 // A cancel kills the child mid-file; that's not a real failure.
@@ -440,7 +472,10 @@ async fn run_batch(
                     break;
                 }
                 failed += 1;
-                let _ = app.emit("file:done", FileDone { index, ok: false, error: Some(e) });
+                let _ = app.emit(
+                    "file:done",
+                    FileDone { index, ok: false, error: Some(e), outputs: vec![] },
+                );
             }
         }
     }
@@ -448,6 +483,26 @@ async fn run_batch(
     let canceled = state.cancel.swap(false, Ordering::SeqCst);
     state.running.store(false, Ordering::SeqCst);
     let _ = app.emit("batch:done", BatchDone { converted, failed, canceled });
+
+    // Batches run for minutes and people tab away — toast when unfocused.
+    let focused = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false);
+    if !focused && !canceled {
+        use tauri_plugin_notification::NotificationExt;
+        let body = if failed > 0 {
+            format!("{converted} converted, {failed} failed")
+        } else {
+            format!("{converted} converted")
+        };
+        let _ = app
+            .notification()
+            .builder()
+            .title("Kecilin — batch finished")
+            .body(body)
+            .show();
+    }
 }
 
 /// Where a converted file lands: inside the custom output dir if set, else in
@@ -469,26 +524,29 @@ pub(crate) fn output_path(
 }
 
 /// Convert one queue item: a single encode for the whole file or one trim
-/// range, or several sequential encodes for a multi-part split.
+/// range, or several sequential encodes for a multi-part split. Returns the
+/// produced output files (path + size) for the result stats.
 async fn convert_one(
     app: &AppHandle,
     item: &BatchItem,
     preset: &Preset,
     out_dir: Option<&str>,
     index: usize,
-) -> Result<(), String> {
+) -> Result<Vec<OutputFile>, String> {
     let seg_count = item.trims.len().max(1);
+    let mut outputs = Vec::with_capacity(seg_count);
     for seg_idx in 0..seg_count {
         let trim = item.trims.get(seg_idx);
         let part = if item.trims.len() > 1 { Some(seg_idx + 1) } else { None };
-        convert_segment(app, item, preset, out_dir, index, trim, part, seg_idx, seg_count)
+        let out = convert_segment(app, item, preset, out_dir, index, trim, part, seg_idx, seg_count)
             .await
             .map_err(|e| match part {
                 Some(n) => format!("part {n}: {e}"),
                 None => e,
             })?;
+        outputs.push(out);
     }
-    Ok(())
+    Ok(outputs)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -502,7 +560,7 @@ async fn convert_segment(
     part: Option<usize>,
     seg_idx: usize,
     seg_count: usize,
-) -> Result<(), String> {
+) -> Result<OutputFile, String> {
     let input = Path::new(&item.path);
     let out_path =
         output_path(input, preset, out_dir, part).ok_or("file has no name or parent")?;
@@ -517,7 +575,7 @@ async fn convert_segment(
         .map(|s| s * 1_000_000.0)
         .filter(|v| *v > 0.0);
 
-    let args = build_ffmpeg_args(&item.path, &out_str, preset, trim);
+    let args = build_ffmpeg_args(&item.path, &out_str, preset, trim, item.audio.as_deref());
     let (mut rx, child) = ffmpeg(app)?.args(args).spawn().map_err(|e| e.to_string())?;
 
     let state = app.state::<BatchState>();
@@ -564,11 +622,37 @@ async fn convert_segment(
     }
 
     if code == Some(0) && out_path.exists() {
-        Ok(())
+        let size = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+        Ok(OutputFile { path: out_str, size })
     } else {
         // Don't leave a corrupt partial file that looks converted.
         let _ = fs::remove_file(&out_path);
         Err(last_error_line(&stderr_tail, code))
+    }
+}
+
+/// Reveal a converted file in the system file manager.
+#[tauri::command]
+pub fn reveal_file(path: String) -> Result<(), String> {
+    tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| e.to_string())
+}
+
+/// Put files on the OS clipboard (as files, not text) so they can be pasted
+/// into WhatsApp/Explorer with Ctrl+V. Multi-part outputs paste together.
+#[tauri::command]
+pub fn copy_file_to_clipboard(paths: Vec<String>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use clipboard_win::{Clipboard, Setter};
+        let _clip = Clipboard::new_attempts(10).map_err(|e| format!("clipboard busy: {e}"))?;
+        clipboard_win::formats::FileList
+            .write_clipboard(&paths[..])
+            .map_err(|e| format!("clipboard error: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = paths;
+        Err("copy-as-file is not supported on this platform".into())
     }
 }
 
@@ -598,7 +682,7 @@ mod tests {
     #[test]
     fn args_match_the_script_exactly() {
         let p = preset_by_name("360p").unwrap();
-        let args = build_ffmpeg_args("in.mp4", "out\\in_whatsapp_360p.mp4", p, None);
+        let args = build_ffmpeg_args("in.mp4", "out\\in_whatsapp_360p.mp4", p, None, None);
         let expected: Vec<String> = [
             "-y", "-i", "in.mp4",
             "-map", "0:v:0", "-map", "0:a?",
@@ -623,10 +707,33 @@ mod tests {
     #[test]
     fn trim_adds_input_seek_and_duration() {
         let p = preset_by_name("480p").unwrap();
-        let args = build_ffmpeg_args("in.mkv", "out.mp4", p, Some(&Trim { start: 5.5, end: 12.0 }));
+        let args =
+            build_ffmpeg_args("in.mkv", "out.mp4", p, Some(&Trim { start: 5.5, end: 12.0 }), None);
         let i = args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(&args[i - 2..i + 2], &["-ss", "5.500", "-i", "in.mkv"]);
         assert_eq!(&args[i + 2..i + 4], &["-t", "6.500"]);
+    }
+
+    #[test]
+    fn mute_drops_the_audio_track() {
+        let p = preset_by_name("480p").unwrap();
+        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, Some("mute"));
+        assert!(args.contains(&"-an".to_string()));
+        assert!(!args.contains(&"0:a?".to_string()));
+        assert!(!args.contains(&"-c:a".to_string()));
+    }
+
+    #[test]
+    fn volume_reduction_adds_filter_and_keeps_aac() {
+        let p = preset_by_name("480p").unwrap();
+        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, Some("50"));
+        let i = args.iter().position(|a| a == "-af").unwrap();
+        assert_eq!(args[i + 1], "volume=0.5");
+        assert!(args.contains(&"-c:a".to_string()));
+        // Unknown values keep audio untouched.
+        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, Some("banana"));
+        assert!(!args.iter().any(|a| a == "-af"));
+        assert!(args.contains(&"0:a?".to_string()));
     }
 
     #[test]

@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { fmtSize, fmtTime, parseTime } from "./format";
 import { useStore } from "./store";
-import type { FileState, Trim } from "./store";
+import type { AudioOpt, FileState, Trim } from "./store";
 
 // Thumbnails are extracted one at a time — each is an ffmpeg spawn.
 let thumbQueue: Promise<void> = Promise.resolve();
 
 export function FileRow({ file, converting }: { file: FileState; converting: boolean }) {
+  const removeFile = useStore((st) => st.removeFile);
   const [editing, setEditing] = useState(false);
   const [thumb, setThumb] = useState<string | null>(null);
+  const [thumbRaw, setThumbRaw] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -20,7 +24,10 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
           path: file.path,
           duration: file.duration,
         });
-        if (live) setThumb(convertFileSrc(p));
+        if (live) {
+          setThumbRaw(p);
+          setThumb(convertFileSrc(p));
+        }
       } catch {
         // no thumbnail — the placeholder stays
       }
@@ -30,12 +37,26 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
     };
   }, [file.path, file.duration]);
 
+  const done = file.status === "done" && file.outputs.length > 0;
+  const outSum = file.outputs.reduce((a, o) => a + o.size, 0);
+  const savedPct =
+    done && file.size > 0 && outSum < file.size
+      ? Math.round(((file.size - outSum) / file.size) * 100)
+      : null;
+
   const badge = {
     queued: converting ? <span className="text-xs text-slate-500">queued</span> : null,
     running: (
       <span className="text-xs tabular-nums text-emerald-400">{Math.round(file.percent)}%</span>
     ),
-    done: <span className="text-xs text-emerald-400">✓ done</span>,
+    done: (
+      <span
+        className="text-xs tabular-nums text-emerald-400"
+        title={`${fmtSize(file.size)} → ${fmtSize(outSum)}`}
+      >
+        ✓ {savedPct != null ? `−${savedPct}%` : fmtSize(outSum)}
+      </span>
+    ),
     failed: (
       <span className="text-xs text-red-400" title={file.error ?? undefined}>
         ✗ failed
@@ -54,17 +75,42 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
       <span className="text-emerald-400"> · ✂ {file.trims.length} parts</span>
     ) : null;
 
+  const audioBadge =
+    file.audio !== "keep" ? (
+      <span className="text-amber-400">
+        {" "}
+        · {file.audio === "mute" ? "muted" : `vol ${file.audio}%`}
+      </span>
+    ) : null;
+
+  async function copyOutputs() {
+    try {
+      await invoke("copy_file_to_clipboard", { paths: file.outputs.map((o) => o.path) });
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard busy — ignore
+    }
+  }
+
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900">
       <div className="flex items-center gap-3 px-4 py-3">
         <button
           onClick={() => setEditing(!editing)}
           disabled={converting}
-          title="Preview / trim"
+          title={done ? "Preview / trim — drag me to share the converted file" : "Preview / trim"}
+          draggable={done && thumbRaw != null}
+          onDragStart={(e) => {
+            e.preventDefault();
+            if (done && thumbRaw) {
+              void startDrag({ item: file.outputs.map((o) => o.path), icon: thumbRaw });
+            }
+          }}
           className="h-10 w-[71px] shrink-0 overflow-hidden rounded-md bg-slate-950 disabled:opacity-60"
         >
           {thumb ? (
-            <img src={thumb} alt="" className="h-full w-full object-cover" />
+            <img src={thumb} alt="" className="pointer-events-none h-full w-full object-cover" />
           ) : (
             <span className="flex h-full items-center justify-center text-slate-600">▶</span>
           )}
@@ -77,15 +123,42 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
             {fmtSize(file.size)}
             {file.duration != null && <> · {fmtTime(file.duration)}</>}
             {trimBadge}
+            {audioBadge}
           </div>
         </div>
         {badge}
+        {done && !converting && (
+          <>
+            <button
+              onClick={() => invoke("reveal_file", { path: file.outputs[0].path })}
+              title="Show the converted file in Explorer"
+              className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs hover:bg-slate-800"
+            >
+              Show
+            </button>
+            <button
+              onClick={copyOutputs}
+              title="Copy the converted file to the clipboard (Ctrl+V to paste)"
+              className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs hover:bg-slate-800"
+            >
+              {copied ? "Copied ✓" : "Copy"}
+            </button>
+          </>
+        )}
         <button
           disabled={converting}
           onClick={() => setEditing(!editing)}
           className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-800 disabled:opacity-40"
         >
           {file.trims.length > 0 ? "Edit trim" : "Trim"}
+        </button>
+        <button
+          disabled={converting}
+          onClick={() => removeFile(file.path)}
+          title="Remove from queue"
+          className="px-1 text-slate-600 hover:text-red-400 disabled:opacity-40"
+        >
+          ✕
         </button>
       </div>
       {file.status === "running" && (
@@ -103,6 +176,7 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
 
 function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void }) {
   const setTrims = useStore((st) => st.setTrims);
+  const setAudio = useStore((st) => st.setAudio);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   // Native playback first; when the webview can't decode the file (HEVC
   // without the Windows codec, .mkv/.avi, …) fall back to a small H.264 proxy
@@ -114,6 +188,8 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState<number | null>(null);
   const [ranges, setRanges] = useState<Trim[]>(file.trims);
+  const [lenMode, setLenMode] = useState<"free" | "30" | "custom">("free");
+  const [customLen, setCustomLen] = useState("15");
   const last = file.trims[file.trims.length - 1];
   const initStart = last?.start ?? 0;
   const initEnd = last?.end ?? file.duration ?? 0;
@@ -123,6 +199,9 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
   const [endText, setEndText] = useState(fmtTime(initEnd));
 
   const showVideo = preview === "native" || preview === "proxy";
+  const customSecs = parseFloat(customLen);
+  const fixedLen =
+    lenMode === "30" ? 30 : lenMode === "custom" && customSecs >= 1 ? customSecs : null;
 
   async function fallbackToProxy() {
     if (triedProxy.current) {
@@ -149,6 +228,22 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
     if (v && scrubTo != null && showVideo) v.currentTime = scrubTo;
   }
 
+  /** Fixed-length mode: the window keeps length L and slides to `sRaw`. */
+  function slideTo(sRaw: number, L: number) {
+    const d = duration ?? sRaw + L;
+    const len = Math.min(L, d);
+    const ns = Math.min(Math.max(0, sRaw), Math.max(0, d - len));
+    update(ns, Math.min(ns + len, d), ns);
+  }
+
+  function handleRange(ns: number, ne: number, moved: "start" | "end") {
+    if (fixedLen != null && duration != null) {
+      slideTo(moved === "start" ? ns : ne - fixedLen, fixedLen);
+    } else {
+      update(ns, ne, moved === "start" ? ns : ne);
+    }
+  }
+
   function commitText(which: "start" | "end", text: string) {
     const t = parseTime(text);
     if (t == null) {
@@ -157,15 +252,21 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
       return;
     }
     const max = duration ?? Number.POSITIVE_INFINITY;
-    if (which === "start") update(Math.min(Math.max(0, t), end - 0.1), end, t);
-    else update(start, Math.min(Math.max(t, start + 0.1), max), t);
+    if (which === "start") handleRange(Math.min(Math.max(0, t), end - 0.1), end, "start");
+    else handleRange(start, Math.min(Math.max(t, start + 0.1), max), "end");
   }
 
   const valid = end > start + 0.05;
 
   function addPart() {
     if (!valid) return;
-    setRanges([...ranges, { start, end }]);
+    const added = { start, end };
+    setRanges([...ranges, added]);
+    // Fixed-length flow: advance the window to right after the added part, so
+    // stamping consecutive Status parts is just Add, Add, Add.
+    if (fixedLen != null && duration != null && added.end < duration - 0.05) {
+      slideTo(added.end, fixedLen);
+    }
   }
 
   function apply() {
@@ -177,6 +278,31 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
     setTrims(file.path, out);
     onClose();
   }
+
+  function togglePlay() {
+    const v = videoRef.current;
+    if (!v || !showVideo) return;
+    if (!v.paused) {
+      v.pause();
+      return;
+    }
+    // Resume from where it paused/seeked; restart when outside the range.
+    if (v.currentTime < start || v.currentTime >= end - 0.05) v.currentTime = start;
+    v.play();
+  }
+
+  // Space toggles play/pause while the editor is open (unless typing).
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.code !== "Space") return;
+      const t = e.target as HTMLElement | null;
+      if (t && ["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(t.tagName)) return;
+      e.preventDefault();
+      togglePlay();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   return (
     <div className="flex flex-col gap-3 border-t border-slate-800 px-4 py-4">
@@ -202,7 +328,9 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           onTimeUpdate={(e) => {
             const v = e.currentTarget;
             setPlayhead(v.currentTime);
-            if (!v.paused && v.currentTime >= end) v.pause();
+            // Auto-pause when playback crosses the range end (but let seeks
+            // beyond it play freely — "start from the middle" is allowed).
+            if (!v.paused && v.currentTime >= end && v.currentTime < end + 0.5) v.pause();
           }}
         />
       )}
@@ -217,6 +345,49 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           Preview couldn't be generated for this file — trim with the slider or typed times below;{" "}
           <b>conversion is unaffected</b>.
         </p>
+      )}
+
+      {duration != null && duration > 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+          <span>Part length:</span>
+          {(
+            [
+              ["free", "Free"],
+              ["30", "30 s (Status)"],
+              ["custom", "Custom"],
+            ] as const
+          ).map(([mode, label]) => (
+            <button
+              key={mode}
+              onClick={() => {
+                setLenMode(mode);
+                const L = mode === "30" ? 30 : mode === "custom" ? customSecs : null;
+                if (L != null && L >= 1) slideTo(start, L);
+              }}
+              className={`rounded-full border px-2.5 py-1 ${
+                lenMode === mode
+                  ? "border-emerald-500 bg-emerald-500/10 text-emerald-300"
+                  : "border-slate-700 hover:bg-slate-800"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+          {lenMode === "custom" && (
+            <label className="flex items-center gap-1">
+              <input
+                value={customLen}
+                onChange={(e) => setCustomLen(e.target.value)}
+                onBlur={() => customSecs >= 1 && slideTo(start, customSecs)}
+                className="w-14 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums"
+              />
+              s
+            </label>
+          )}
+          {fixedLen != null && (
+            <span className="text-slate-500">— slide the window, then “+ Add part”</span>
+          )}
+        </div>
       )}
 
       {ranges.length > 0 && (
@@ -245,24 +416,22 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           start={start}
           end={end}
           playhead={showVideo ? playhead : null}
-          onChange={(ns, ne, moved) => update(ns, ne, moved === "start" ? ns : ne)}
+          onChange={handleRange}
+          onSeek={(t) => {
+            const v = videoRef.current;
+            if (v && showVideo) {
+              v.currentTime = t;
+              setPlayhead(t);
+            }
+          }}
         />
       )}
 
       <div className="flex flex-wrap items-center gap-3 text-sm">
         {showVideo && (
           <button
-            onClick={() => {
-              const v = videoRef.current;
-              if (!v) return;
-              if (playing) {
-                v.pause();
-                return;
-              }
-              // Resume from where it paused; restart when outside the range.
-              if (v.currentTime < start || v.currentTime >= end - 0.05) v.currentTime = start;
-              v.play();
-            }}
+            onClick={togglePlay}
+            title="Space also toggles play/pause; click the timeline to seek"
             className="w-32 rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800"
           >
             {playing ? "⏸ Pause" : "▶ Play range"}
@@ -290,6 +459,20 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
             onKeyDown={(e) => e.key === "Enter" && commitText("end", endText)}
             className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums"
           />
+        </label>
+        <label className="flex items-center gap-1.5 text-slate-300">
+          audio
+          <select
+            value={file.audio}
+            onChange={(e) => setAudio(file.path, e.target.value as AudioOpt)}
+            className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1"
+          >
+            <option value="keep">keep</option>
+            <option value="75">75%</option>
+            <option value="50">50%</option>
+            <option value="25">25%</option>
+            <option value="mute">mute</option>
+          </select>
         </label>
         <span className="text-xs text-slate-500">
           {valid ? `${fmtTime(end - start)} selected` : "end must be after start"}
@@ -325,7 +508,9 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
             onClick={apply}
             className="rounded-lg bg-emerald-600 px-3 py-1.5 font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
           >
-            {ranges.length > 0 ? `Apply ${ranges.length} part${ranges.length > 1 ? "s" : ""}` : "Apply"}
+            {ranges.length > 0
+              ? `Apply ${ranges.length} part${ranges.length > 1 ? "s" : ""}`
+              : "Apply"}
           </button>
         </div>
       </div>
@@ -341,15 +526,17 @@ function RangeSlider({
   end,
   playhead,
   onChange,
+  onSeek,
 }: {
   duration: number;
   start: number;
   end: number;
   playhead?: number | null;
   onChange: (start: number, end: number, moved: "start" | "end") => void;
+  onSeek?: (t: number) => void;
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
-  const drag = useRef<"start" | "end" | null>(null);
+  const drag = useRef<"start" | "end" | "seek" | null>(null);
 
   function timeAt(clientX: number): number {
     const el = trackRef.current;
@@ -360,14 +547,29 @@ function RangeSlider({
 
   const pct = (t: number) => (duration > 0 ? (t / duration) * 100 : 0);
 
+  function nudge(which: "start" | "end", delta: number) {
+    if (which === "start") {
+      onChange(Math.min(Math.max(0, start + delta), end - MIN_GAP), end, "start");
+    } else {
+      onChange(start, Math.max(Math.min(duration, end + delta), start + MIN_GAP), "end");
+    }
+  }
+
   return (
     <div
       ref={trackRef}
       className="relative h-8 touch-none select-none"
+      onPointerDown={(ev) => {
+        // Thumbs stop propagation — a press here is a seek on the timeline.
+        drag.current = "seek";
+        (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
+        onSeek?.(timeAt(ev.clientX));
+      }}
       onPointerMove={(ev) => {
         if (!drag.current) return;
         const t = timeAt(ev.clientX);
-        if (drag.current === "start") onChange(Math.min(t, end - MIN_GAP), end, "start");
+        if (drag.current === "seek") onSeek?.(t);
+        else if (drag.current === "start") onChange(Math.min(t, end - MIN_GAP), end, "start");
         else onChange(start, Math.max(t, start + MIN_GAP), "end");
       }}
       onPointerUp={() => (drag.current = null)}
@@ -386,12 +588,25 @@ function RangeSlider({
       {(["start", "end"] as const).map((which) => (
         <div
           key={which}
+          tabIndex={0}
+          role="slider"
+          aria-label={which === "start" ? "Trim start" : "Trim end"}
+          aria-valuenow={which === "start" ? start : end}
           onPointerDown={(ev) => {
+            ev.stopPropagation();
             drag.current = which;
             (ev.target as Element).setPointerCapture(ev.pointerId);
             ev.preventDefault();
           }}
-          className="absolute top-1/2 h-5 w-3 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded bg-emerald-400 shadow"
+          onKeyDown={(ev) => {
+            // Arrow keys nudge the focused handle: 0.1 s, Shift = 1 s.
+            const step = ev.shiftKey ? 1 : 0.1;
+            if (ev.key === "ArrowLeft") nudge(which, -step);
+            else if (ev.key === "ArrowRight") nudge(which, step);
+            else return;
+            ev.preventDefault();
+          }}
+          className="absolute top-1/2 h-5 w-3 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded bg-emerald-400 shadow focus:outline focus:outline-2 focus:outline-white/70"
           style={{ left: `${pct(which === "start" ? start : end)}%` }}
         />
       ))}

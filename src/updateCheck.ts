@@ -5,7 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 const REPO = "DarkTama/Kecilin";
 const LATEST_API = `https://api.github.com/repos/${REPO}/releases/latest`;
-const RELEASES_PAGE = `https://github.com/${REPO}/releases`;
+export const RELEASES_PAGE = `https://github.com/${REPO}/releases`;
 
 /** "v1.2.3" / "1.2.3-beta" -> [major, minor, patch] (pre-release suffix ignored). */
 function parseSemver(v: string): [number, number, number] {

@@ -55,22 +55,19 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 - ✅ **Multi-part trim** — the trim editor holds a list of ranges ("+ Add part"); each range is its own ffmpeg run (the `-ss`/`-t` invocation unchanged), output as `{name}_whatsapp_{preset}_part1.mp4`, `_part2`, … One range keeps the plain (no suffix) name. The row's progress bar aggregates across the file's parts.
 - ✅ Drag-and-drop videos onto the window (mixes with folder scans and the file picker).
 
-### Next up — QoL round 2 (planned, from usage feedback)
+### QoL rounds 2 + 3 (shipped in v0.4.0)
 
-- **Remove from queue** — an × on each row to unselect a video, plus a "Clear queue" action; today the only way out is rescanning.
-- **Version info in the app** — show the current version in a footer (`getVersion()`), clicking it opens the releases page; pairs with the existing launch update check.
-- **Result stats** — done rows show output size and savings ("205.6 MB → 24.1 MB, −88%"); the batch summary shows total space saved. (Data is free: stat the output after each file.)
-- **Reveal converted file** — a button on a done row that opens/reveals its own output in Explorer (not just the folder).
-- **Batch-finished notification** — a Windows toast when the batch ends while the window is unfocused; conversions run for minutes and people tab away.
-- **Remember preferences** — persist preset, custom output folder, and window size across runs (small settings file, same plugin-store approach as AnyLeap).
-
-### Next up — QoL round 3 (planned, from usage feedback)
-
-- **Fixed-length parts ("Status mode")** — not an auto-cut (the app can't know which moments the user wants): the trim editor gets a fixed-length mode — pick a duration preset (30 s for WhatsApp Status, or custom), the selection becomes a fixed-width window the user slides to the moment they want, and "+ Add part" stamps it; repeat per part. Builds directly on multi-part trim.
-- **Size guidance, not a forced target** — estimate output size per preset (maxrate × effective duration, trims respected) and show it on the preset cards ("≤ ~40 MB") and as a batch total; flag WhatsApp-relevant thresholds ("fits under 64 MB ✓"). This absorbs the earlier "target-size mode" idea as a *guide* — the user picks an informed preset; the encoder is never forced to chase a byte budget.
-- **Audio: mute or turn down** — per-file option, default untouched: mute (drop the audio track — smaller file) or reduce volume (ffmpeg `volume=` filter at e.g. 75/50/25%). For gameplay clips that don't need sound or recordings that came in hot.
-- **Hand off results without Explorer** — on a done row: drag the converted file straight out of the app (into WhatsApp Web, a chat, anywhere), and a "Copy" action that puts the file on the Windows clipboard for Ctrl+V.
-- **Trim precision** — arrow keys nudge the focused trim handle (Shift = bigger steps), Space toggles play/pause, and the playhead becomes seekable: click or drag anywhere on the timeline to start playback from that moment, independent of the handles.
+- ✅ **Remove from queue** — × on each row, plus "Clear queue" in the header.
+- ✅ **Version info in the app** — footer with the current version and a releases link; pairs with the launch update check.
+- ✅ **Result stats** — done rows show savings ("✓ −88%", sizes in the tooltip); the batch summary totals space saved. Backed by `outputs` (path + size) on the `file:done` event.
+- ✅ **Reveal converted file** — "Show" on a done row opens its output in Explorer.
+- ✅ **Batch-finished notification** — Windows toast when the batch ends unfocused (skipped on cancel).
+- ✅ **Remember preferences** — preset + output folder via zustand `persist` (localStorage; no store plugin needed); window size/position via `tauri-plugin-window-state`.
+- ✅ **Fixed-length parts ("Status mode")** — Part length: Free / 30 s / custom; the selection becomes a fixed window you slide, "+ Add part" stamps it and auto-advances to the next window.
+- ✅ **Size guidance** — per-preset ceiling on the cards ("≤ ~40 MB", maxrate + audio × encoded seconds, trims respected) with a "fits 64 MB ✓" flag.
+- ✅ **Audio: mute or turn down** — per-file (keep/75/50/25/mute) in the trim panel; mute drops the track (`-an`), reductions use `-af volume=`.
+- ✅ **Hand off results** — drag the done row's thumbnail out of the app (tauri-plugin-drag; multi-part drags all parts), or "Copy" puts the file(s) on the clipboard via `clipboard-win` for Ctrl+V.
+- ✅ **Trim precision** — arrow keys nudge the focused handle (Shift = 1 s), Space toggles play/pause, and clicking/dragging the timeline seeks the playhead anywhere — playback can start mid-video, outside the selection.
 
 ### Later
 

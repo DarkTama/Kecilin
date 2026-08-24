@@ -9,6 +9,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_drag::init())
         .manage(BatchState::default())
         .invoke_handler(tauri::generate_handler![
             commands::check_ffmpeg,
@@ -19,6 +22,8 @@ pub fn run() {
             commands::open_output_folder,
             commands::prepare_preview,
             commands::prepare_thumbnail,
+            commands::reveal_file,
+            commands::copy_file_to_clipboard,
         ])
         .setup(|app| {
             commands::cleanup_cache(app.handle());

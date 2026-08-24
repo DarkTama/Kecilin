@@ -1,36 +1,51 @@
 import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { FileRow } from "./FileRow";
+import { fmtSize } from "./format";
 import { useStore } from "./store";
-import { checkForUpdates } from "./updateCheck";
-import type { Preset, Summary, VideoFile } from "./store";
+import { checkForUpdates, RELEASES_PAGE } from "./updateCheck";
+import type { FileState, OutputFile, Preset, Summary, VideoFile } from "./store";
 
-const PRESETS: { id: Preset; hint: string }[] = [
-  { id: "360p", hint: "small, good for long clips" },
-  { id: "480p", hint: "balanced small" },
-  { id: "720p", hint: "better quality, gameplay-friendly" },
+const PRESETS: { id: Preset; hint: string; maxrateKbps: number }[] = [
+  { id: "360p", hint: "small, good for long clips", maxrateKbps: 1200 },
+  { id: "480p", hint: "balanced small", maxrateKbps: 2200 },
+  { id: "720p", hint: "better quality, gameplay-friendly", maxrateKbps: 4200 },
 ];
 
 const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "avi", "webm"];
+
+/** Seconds that will actually be encoded for a file (trims respected). */
+function effectiveSecs(f: FileState): number {
+  if (f.trims.length > 0) return f.trims.reduce((a, t) => a + Math.max(0, t.end - t.start), 0);
+  return f.duration ?? 0;
+}
 
 export default function App() {
   const s = useStore();
   const [scanning, setScanning] = useState(false);
   const [uiError, setUiError] = useState<string | null>(null);
+  const [version, setVersion] = useState("");
 
   useEffect(() => {
     invoke<string>("check_ffmpeg").catch((e) => useStore.getState().setFfmpegError(String(e)));
     void checkForUpdates();
+    getVersion().then(setVersion).catch(() => {});
     const subs = [
       listen<{ index: number }>("file:start", (e) => useStore.getState().fileStart(e.payload.index)),
       listen<{ index: number; percent: number }>("file:progress", (e) =>
         useStore.getState().fileProgress(e.payload.index, e.payload.percent),
       ),
-      listen<{ index: number; ok: boolean; error: string | null }>("file:done", (e) =>
-        useStore.getState().fileDone(e.payload.index, e.payload.ok, e.payload.error),
+      listen<{ index: number; ok: boolean; error: string | null; outputs: OutputFile[] }>(
+        "file:done",
+        (e) =>
+          useStore
+            .getState()
+            .fileDone(e.payload.index, e.payload.ok, e.payload.error, e.payload.outputs),
       ),
       listen<Summary>("batch:done", (e) => useStore.getState().batchDone(e.payload)),
       // Drag-and-drop videos anywhere on the window; scan_files skips non-videos.
@@ -96,7 +111,12 @@ export default function App() {
     s.startBatch();
     try {
       await invoke("start_batch", {
-        items: s.files.map((f) => ({ path: f.path, duration: f.duration, trims: f.trims })),
+        items: s.files.map((f) => ({
+          path: f.path,
+          duration: f.duration,
+          trims: f.trims,
+          audio: f.audio === "keep" ? null : f.audio,
+        })),
         preset: s.preset,
         outDir: s.outDir,
       });
@@ -111,14 +131,19 @@ export default function App() {
   const finished = s.files.filter((f) => f.status === "done" || f.status === "failed").length;
   const running = s.files.find((f) => f.status === "running");
   const overall = total ? ((finished + (running ? running.percent / 100 : 0)) / total) * 100 : 0;
-  const doneFile = s.files.find((f) => f.status === "done");
+  const doneFiles = s.files.filter((f) => f.status === "done" && f.outputs.length > 0);
+  const savedIn = doneFiles.reduce((a, f) => a + f.size, 0);
+  const savedOut = doneFiles.reduce((a, f) => a + f.outputs.reduce((x, o) => x + o.size, 0), 0);
   const outLabel = s.outDir
     ? (s.outDir.split(/[\\/]/).filter(Boolean).pop() ?? s.outDir)
     : `whatsapp_${s.preset}`;
+  // Ceiling estimate: video maxrate + ~160 kbps AAC over the encoded seconds.
+  const totalSecs = s.files.reduce((a, f) => a + effectiveSecs(f), 0);
+  const estimateBytes = (kbps: number) => ((kbps + 160) * 1000 * totalSecs) / 8;
 
   return (
-    <div className="min-h-screen">
-      <div className="mx-auto flex max-w-3xl flex-col gap-5 px-6 py-8">
+    <div className="flex min-h-screen flex-col">
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 px-6 py-8">
         <header className="flex items-baseline justify-between">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">
@@ -142,6 +167,11 @@ export default function App() {
               >
                 {scanning ? "Scanning…" : s.folder ? "Change folder…" : "Scan folder…"}
               </button>
+              {s.files.length > 0 && (
+                <button onClick={() => s.clearQueue()} className="text-slate-500 hover:text-slate-300">
+                  Clear queue
+                </button>
+              )}
             </div>
           )}
         </header>
@@ -186,21 +216,35 @@ export default function App() {
             )}
 
             <div className="grid grid-cols-3 gap-3">
-              {PRESETS.map((p) => (
-                <button
-                  key={p.id}
-                  disabled={s.converting}
-                  onClick={() => s.setPreset(p.id)}
-                  className={`rounded-xl border px-4 py-3 text-left transition ${
-                    s.preset === p.id
-                      ? "border-emerald-500 bg-emerald-500/10"
-                      : "border-slate-800 bg-slate-900 hover:border-slate-600"
-                  } disabled:opacity-60`}
-                >
-                  <div className="font-semibold">{p.id}</div>
-                  <div className="text-xs text-slate-400">{p.hint}</div>
-                </button>
-              ))}
+              {PRESETS.map((p) => {
+                const est = estimateBytes(p.maxrateKbps);
+                return (
+                  <button
+                    key={p.id}
+                    disabled={s.converting}
+                    onClick={() => s.setPreset(p.id)}
+                    className={`rounded-xl border px-4 py-3 text-left transition ${
+                      s.preset === p.id
+                        ? "border-emerald-500 bg-emerald-500/10"
+                        : "border-slate-800 bg-slate-900 hover:border-slate-600"
+                    } disabled:opacity-60`}
+                  >
+                    <div className="font-semibold">{p.id}</div>
+                    <div className="text-xs text-slate-400">{p.hint}</div>
+                    {totalSecs > 0 && (
+                      <div
+                        className="mt-1 text-[11px] text-slate-500"
+                        title="Worst-case estimate for the whole queue: video maxrate + audio over the encoded seconds"
+                      >
+                        ≤ ~{fmtSize(est)}
+                        {est <= 64 * 1024 * 1024 && (
+                          <span className="text-emerald-500"> · fits 64 MB ✓</span>
+                        )}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
 
             <div className="flex items-center gap-2 text-xs text-slate-400">
@@ -278,12 +322,19 @@ export default function App() {
                   {s.summary.failed > 0 && (
                     <span className="text-red-400">, {s.summary.failed} failed</span>
                   )}
+                  {savedOut > 0 && savedIn > savedOut && (
+                    <span className="text-slate-400">
+                      {" "}
+                      · saved {fmtSize(savedIn - savedOut)} (−
+                      {Math.round(((savedIn - savedOut) / savedIn) * 100)}%)
+                    </span>
+                  )}
                 </span>
-                {doneFile && (
+                {doneFiles.length > 0 && (
                   <button
                     onClick={() =>
                       invoke("open_output_folder", {
-                        anchor: doneFile.path,
+                        anchor: doneFiles[0].path,
                         preset: s.batchPreset,
                         outDir: s.batchOutDir,
                       })
@@ -298,6 +349,12 @@ export default function App() {
           </>
         )}
       </div>
+      <footer className="pb-4 text-center text-xs text-slate-600">
+        Kecilin {version && `v${version}`} ·{" "}
+        <button onClick={() => openUrl(RELEASES_PAGE)} className="hover:text-slate-400">
+          releases
+        </button>
+      </footer>
     </div>
   );
 }
