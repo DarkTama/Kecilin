@@ -44,6 +44,7 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 
 ### v2+
 
+- **Multi-part trim** — split one video into multiple exported segments: the per-file trim editor grows from one range to a list of ranges; each range is its own ffmpeg run (the existing `-ss`/`-t` invocation, unchanged), output as `{name}_whatsapp_{preset}_part1.mp4`, `_part2`, … Batch progress counts segments, not files.
 - Parallel conversion (Tokio pool up to core count — mostly pays off for many short clips).
 - Drag-and-drop individual files onto the window.
 - Custom preset editor / advanced flags.
@@ -53,7 +54,7 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 
 ### Non-goals
 
-- **Not** a video editor beyond trim — no crop, filters, joining, or multi-segment cuts.
+- **Not** a video editor beyond trimming/splitting — no crop, filters, or joining. (Multi-segment cuts moved to v2+ scope.)
 - **Not** a WhatsApp client — no sending, no WhatsApp API; output files only.
 - **Not** rebuilding any video pipeline — ffmpeg owns the encode.
 
