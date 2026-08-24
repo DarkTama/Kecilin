@@ -124,6 +124,10 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
               setDuration((d) => d ?? v.duration);
               if (end <= 0) update(start, v.duration);
             }
+            // Audio decodes but the video track can't (e.g. HEVC without the
+            // Windows codec extension): no error fires, frames stay black,
+            // and videoWidth stays 0 — fall back instead of showing black.
+            if (v.videoWidth === 0) setCanPreview(false);
           }}
           onTimeUpdate={(e) => {
             const v = e.currentTarget;
@@ -133,7 +137,9 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
         />
       ) : (
         <p className="text-xs text-slate-400">
-          Preview isn't available for this format — trim with the slider or type times below.
+          Preview isn't available — this file's video codec can't be decoded by the app's webview
+          (common for HEVC/H.265 without Windows' HEVC extension). Trim with the slider or typed
+          times below; <b>conversion is unaffected</b>.
         </p>
       )}
 

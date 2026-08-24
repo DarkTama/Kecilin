@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Kecilin",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "id.co.dak.kecilin",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -17,7 +17,7 @@
         "height": 680,
         "minWidth": 720,
         "minHeight": 540,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --disable-direct-composition-video-overlays"
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --disable-direct-composition-video-overlays --disable-accelerated-video-decode"
       }
     ],
     "security": {
