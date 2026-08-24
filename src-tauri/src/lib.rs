@@ -17,7 +17,13 @@ pub fn run() {
             commands::start_batch,
             commands::cancel_batch,
             commands::open_output_folder,
+            commands::prepare_preview,
+            commands::prepare_thumbnail,
         ])
+        .setup(|app| {
+            commands::cleanup_cache(app.handle());
+            Ok(())
+        })
         .on_window_event(|window, event| {
             // Never leave an orphan ffmpeg encoding behind after the window closes.
             if let tauri::WindowEvent::Destroyed = event {

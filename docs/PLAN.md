@@ -48,12 +48,16 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 - ✅ **Pick individual files** — convert chosen files, not only a whole folder: a file picker next to the folder picker; the queue mixes both. (Drag-and-drop onto the window stays v2.)
 - ✅ **Custom output folder** — optional override for where converted files land; the default stays `whatsapp_{preset}` inside the source folder (the script contract).
 
-### v2+
+### v2 (shipped in v0.3.0)
 
-- **Per-file preview** — a thumbnail for every file in the queue (one ffmpeg frame grab at scan time, cached) and click-to-play right from the row, not only inside the trim editor.
-- **Multi-part trim** — split one video into multiple exported segments: the per-file trim editor grows from one range to a list of ranges; each range is its own ffmpeg run (the existing `-ss`/`-t` invocation, unchanged), output as `{name}_whatsapp_{preset}_part1.mp4`, `_part2`, … Batch progress counts segments, not files.
+- ✅ **Universal preview** — when the webview can't decode a file (HEVC without Windows' codec extension, `.mkv`, `.avi`, …) the app re-encodes a small cached H.264/360p proxy with the bundled ffmpeg and previews that. Detection: `onError` plus `videoWidth === 0` after metadata (the audio-plays-video-black case). Cache in the app cache dir, keyed by path+mtime+size, wiped after 7 days on launch.
+- ✅ **Per-file preview** — a thumbnail for every queue row (one cached ffmpeg frame grab, extracted sequentially) that opens the preview/trim panel on click.
+- ✅ **Multi-part trim** — the trim editor holds a list of ranges ("+ Add part"); each range is its own ffmpeg run (the `-ss`/`-t` invocation unchanged), output as `{name}_whatsapp_{preset}_part1.mp4`, `_part2`, … One range keeps the plain (no suffix) name. The row's progress bar aggregates across the file's parts.
+- ✅ Drag-and-drop videos onto the window (mixes with folder scans and the file picker).
+
+### Later
+
 - Parallel conversion (Tokio pool up to core count — mostly pays off for many short clips).
-- Drag-and-drop individual files onto the window.
 - Custom preset editor / advanced flags.
 - Optional GPU encode (NVENC) for speed at some quality cost.
 - Recursive folder scan; smarter overwrite policy.
@@ -83,7 +87,7 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 
 ## Known issues
 
-- **Trim preview renders black while audio plays, on one AMD machine** (Ryzen 5 5600G + RX 6700 XT, driver 26.7.1; same build previews fine on the dev machine). Not a file or app-logic bug — conversions are unaffected (the encode never touches the webview). v0.2.0 disabled DirectComposition video overlays; **still black**, so **v0.2.1 escalates on two fronts**: `--disable-accelerated-video-decode` (software decode for previews — covers hardware-decoder black frames; near-free since the webview only ever decodes one preview) and a `videoWidth === 0` check after metadata that switches to the slider/typed-times fallback with an explanatory message — covering the codec-missing case (e.g. HEVC/H.265 without Windows' HEVC extension), where audio decodes, video can't, and no GPU flag can ever help. Flag-editing note: the config field is `additionalBrowserArgs`, and it *replaces* wry's defaults — always keep `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required`. Last-resort escalation if a supported codec still renders black: `--disable-direct-composition`.
+- **RESOLVED (v0.3.0): trim preview black while audio plays on one machine.** Root cause: the files were OBS recordings encoded as **HEVC**; WebView2 only decodes HEVC when Windows' "HEVC Video Extensions" are present. The user's laptop has the OEM extension (previews fine, even for the very same file over SMB), the desktop doesn't (`videoWidth` stays 0, audio still plays, no error event — hence silent black before v0.2.1). Not a GPU/driver bug; v0.2.0's overlay flag and v0.2.1's decode flag were red herrings (both kept — harmless, and they cover genuine overlay/decoder failure modes). The real fix is v0.3.0's **universal proxy preview** (see v2 above): the bundled ffmpeg decodes anything. Flag-editing note kept for posterity: the config field is `additionalBrowserArgs`, and it *replaces* wry's defaults — always keep `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required`.
 
 ## Settled (were open questions)
 

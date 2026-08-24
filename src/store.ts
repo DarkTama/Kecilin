@@ -13,7 +13,8 @@ export type VideoFile = {
 };
 
 export type FileState = VideoFile & {
-  trim: Trim | null;
+  /** Zero ranges = whole file; one = plain trim; several = multi-part split. */
+  trims: Trim[];
   status: FileStatus;
   percent: number;
   error: string | null;
@@ -38,7 +39,7 @@ type Store = {
   addFiles: (files: VideoFile[]) => void;
   setPreset: (p: Preset) => void;
   setOutDir: (d: string | null) => void;
-  setTrim: (path: string, trim: Trim | null) => void;
+  setTrims: (path: string, trims: Trim[]) => void;
   startBatch: () => void;
   fileStart: (index: number) => void;
   fileProgress: (index: number, percent: number) => void;
@@ -63,7 +64,7 @@ export const useStore = create<Store>((set) => ({
     set({
       folder,
       summary: null,
-      files: files.map((f) => ({ ...f, trim: null, status: "queued", percent: 0, error: null })),
+      files: files.map((f) => ({ ...f, trims: [], status: "queued", percent: 0, error: null })),
     }),
 
   addFiles: (files) =>
@@ -71,7 +72,7 @@ export const useStore = create<Store>((set) => ({
       const known = new Set(s.files.map((f) => f.path));
       const fresh = files
         .filter((f) => !known.has(f.path))
-        .map((f) => ({ ...f, trim: null, status: "queued" as const, percent: 0, error: null }));
+        .map((f) => ({ ...f, trims: [], status: "queued" as const, percent: 0, error: null }));
       return { summary: null, files: [...s.files, ...fresh] };
     }),
 
@@ -79,8 +80,8 @@ export const useStore = create<Store>((set) => ({
 
   setOutDir: (outDir) => set({ outDir }),
 
-  setTrim: (path, trim) =>
-    set((s) => ({ files: s.files.map((f) => (f.path === path ? { ...f, trim } : f)) })),
+  setTrims: (path, trims) =>
+    set((s) => ({ files: s.files.map((f) => (f.path === path ? { ...f, trims } : f)) })),
 
   startBatch: () =>
     set((s) => ({

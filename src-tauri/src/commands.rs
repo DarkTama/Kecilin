@@ -69,7 +69,10 @@ pub struct Trim {
 pub struct BatchItem {
     pub path: String,
     pub duration: Option<f64>,
-    pub trim: Option<Trim>,
+    /// Zero ranges = convert the whole file; one = plain trim; several =
+    /// multi-part split (`_part1`, `_part2`, … outputs).
+    #[serde(default)]
+    pub trims: Vec<Trim>,
 }
 
 #[derive(Serialize, Clone)]
@@ -281,6 +284,119 @@ pub fn cancel_batch(state: State<'_, BatchState>) {
     state.abort();
 }
 
+fn stable_hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Cache file path for a derived artifact of `path`, keyed by path+mtime+size
+/// so an edited source gets a fresh entry.
+fn cache_file(app: &AppHandle, sub: &str, path: &str, ext: &str) -> Result<PathBuf, String> {
+    let meta = fs::metadata(path).map_err(|e| format!("cannot read file: {e}"))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let key = format!("{path}|{mtime}|{}", meta.len());
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join(sub);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(format!("{:016x}.{ext}", stable_hash(&key))))
+}
+
+/// Re-encode a small H.264/AAC proxy so the webview can preview formats it
+/// can't decode natively (HEVC, .mkv, .avi, …). Cached; cheap `veryfast` 360p.
+#[tauri::command]
+pub async fn prepare_preview(app: AppHandle, path: String) -> Result<String, String> {
+    let out = cache_file(&app, "previews", &path, "mp4")?;
+    let out_str = out.to_str().ok_or("cache path is not valid UTF-8")?.to_string();
+    if out.exists() {
+        return Ok(out_str);
+    }
+    let output = ffmpeg(&app)?
+        .args([
+            "-y", "-i", &path, "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn",
+            "-vf", "scale=-2:360", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-ar", "48000",
+            "-movflags", "+faststart", &out_str,
+        ])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() || !out.exists() {
+        let _ = fs::remove_file(&out);
+        return Err(last_error_line(
+            &String::from_utf8_lossy(&output.stderr),
+            output.status.code(),
+        ));
+    }
+    Ok(out_str)
+}
+
+/// One frame as a small JPEG for the queue row. Seeks ~10% in (capped at 30s);
+/// retries at 0 for very short files where the seek overshoots.
+#[tauri::command]
+pub async fn prepare_thumbnail(
+    app: AppHandle,
+    path: String,
+    duration: Option<f64>,
+) -> Result<String, String> {
+    let out = cache_file(&app, "thumbs", &path, "jpg")?;
+    let out_str = out.to_str().ok_or("cache path is not valid UTF-8")?.to_string();
+    if out.exists() {
+        return Ok(out_str);
+    }
+    let seek = duration.map(|d| (d * 0.1).clamp(0.0, 30.0)).unwrap_or(0.0);
+    for ss in [seek, 0.0] {
+        let output = ffmpeg(&app)?
+            .args([
+                "-y", "-ss", &format!("{ss:.3}"), "-i", &path,
+                "-frames:v", "1", "-vf", "scale=-2:90", "-q:v", "5", &out_str,
+            ])
+            .output()
+            .await
+            .map_err(|e| e.to_string())?;
+        if output.status.success() && out.exists() {
+            return Ok(out_str);
+        }
+        let _ = fs::remove_file(&out);
+        if ss == 0.0 {
+            return Err(last_error_line(
+                &String::from_utf8_lossy(&output.stderr),
+                output.status.code(),
+            ));
+        }
+    }
+    unreachable!()
+}
+
+/// Drop cached previews/thumbnails older than a week. Called on startup.
+pub fn cleanup_cache(app: &AppHandle) {
+    let Ok(base) = app.path().app_cache_dir() else { return };
+    for sub in ["previews", "thumbs"] {
+        let Ok(rd) = fs::read_dir(base.join(sub)) else { continue };
+        for entry in rd.flatten() {
+            let old = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_secs() > 7 * 24 * 3600)
+                .unwrap_or(false);
+            if old {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 /// Open the batch output folder in the file manager. `anchor` is any converted
 /// file's input path; with no custom `out_dir` the output sits next to it.
 #[tauri::command]
@@ -335,16 +451,25 @@ async fn run_batch(
 }
 
 /// Where a converted file lands: inside the custom output dir if set, else in
-/// `whatsapp_{preset}` next to the input (the script's layout).
-pub(crate) fn output_path(input: &Path, preset: &Preset, out_dir: Option<&str>) -> Option<PathBuf> {
+/// `whatsapp_{preset}` next to the input (the script's layout). `part` appends
+/// `_partN` for multi-part splits.
+pub(crate) fn output_path(
+    input: &Path,
+    preset: &Preset,
+    out_dir: Option<&str>,
+    part: Option<usize>,
+) -> Option<PathBuf> {
     let stem = input.file_stem()?.to_string_lossy();
     let dir = match out_dir {
         Some(d) => PathBuf::from(d),
         None => input.parent()?.join(format!("whatsapp_{}", preset.name)),
     };
-    Some(dir.join(format!("{}_whatsapp_{}.mp4", stem, preset.name)))
+    let suffix = part.map(|n| format!("_part{n}")).unwrap_or_default();
+    Some(dir.join(format!("{}_whatsapp_{}{}.mp4", stem, preset.name, suffix)))
 }
 
+/// Convert one queue item: a single encode for the whole file or one trim
+/// range, or several sequential encodes for a multi-part split.
 async fn convert_one(
     app: &AppHandle,
     item: &BatchItem,
@@ -352,21 +477,47 @@ async fn convert_one(
     out_dir: Option<&str>,
     index: usize,
 ) -> Result<(), String> {
+    let seg_count = item.trims.len().max(1);
+    for seg_idx in 0..seg_count {
+        let trim = item.trims.get(seg_idx);
+        let part = if item.trims.len() > 1 { Some(seg_idx + 1) } else { None };
+        convert_segment(app, item, preset, out_dir, index, trim, part, seg_idx, seg_count)
+            .await
+            .map_err(|e| match part {
+                Some(n) => format!("part {n}: {e}"),
+                None => e,
+            })?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn convert_segment(
+    app: &AppHandle,
+    item: &BatchItem,
+    preset: &Preset,
+    out_dir: Option<&str>,
+    index: usize,
+    trim: Option<&Trim>,
+    part: Option<usize>,
+    seg_idx: usize,
+    seg_count: usize,
+) -> Result<(), String> {
     let input = Path::new(&item.path);
-    let out_path = output_path(input, preset, out_dir).ok_or("file has no name or parent")?;
+    let out_path =
+        output_path(input, preset, out_dir, part).ok_or("file has no name or parent")?;
     let dir = out_path.parent().ok_or("output has no parent folder")?;
     fs::create_dir_all(dir).map_err(|e| format!("cannot create output folder: {e}"))?;
     let out_str = out_path.to_str().ok_or("output path is not valid UTF-8")?.to_string();
 
     // Progress denominator: the trimmed range if set, else the scanned duration.
-    let denom_us: Option<f64> = item
-        .trim
+    let denom_us: Option<f64> = trim
         .map(|t| (t.end - t.start).max(0.0))
         .or(item.duration)
         .map(|s| s * 1_000_000.0)
         .filter(|v| *v > 0.0);
 
-    let args = build_ffmpeg_args(&item.path, &out_str, preset, item.trim.as_ref());
+    let args = build_ffmpeg_args(&item.path, &out_str, preset, trim);
     let (mut rx, child) = ffmpeg(app)?.args(args).spawn().map_err(|e| e.to_string())?;
 
     let state = app.state::<BatchState>();
@@ -381,7 +532,10 @@ async fn convert_one(
                 if let (Some(us), Some(denom)) =
                     (parse_progress_us(&String::from_utf8_lossy(&bytes)), denom_us)
                 {
-                    let percent = ((us as f64 / denom) * 100.0).clamp(0.0, 100.0);
+                    let seg_pct = (us as f64 / denom).clamp(0.0, 1.0);
+                    // Aggregate across the file's segments so the row's bar
+                    // runs 0→100 once even for a multi-part split.
+                    let percent = ((seg_idx as f64 + seg_pct) / seg_count as f64) * 100.0;
                     if last_emit.elapsed() >= Duration::from_millis(250) {
                         last_emit = Instant::now();
                         let _ = app.emit("file:progress", FileProgress { index, percent });
@@ -495,16 +649,20 @@ mod tests {
     }
 
     #[test]
-    fn output_path_default_and_override() {
+    fn output_path_default_override_and_parts() {
         let p = preset_by_name("480p").unwrap();
         let input = Path::new("D:\\vids\\clip.mkv");
         assert_eq!(
-            output_path(input, p, None).unwrap(),
+            output_path(input, p, None, None).unwrap(),
             Path::new("D:\\vids\\whatsapp_480p\\clip_whatsapp_480p.mp4")
         );
         assert_eq!(
-            output_path(input, p, Some("E:\\out")).unwrap(),
+            output_path(input, p, Some("E:\\out"), None).unwrap(),
             Path::new("E:\\out\\clip_whatsapp_480p.mp4")
+        );
+        assert_eq!(
+            output_path(input, p, None, Some(2)).unwrap(),
+            Path::new("D:\\vids\\whatsapp_480p\\clip_whatsapp_480p_part2.mp4")
         );
     }
 

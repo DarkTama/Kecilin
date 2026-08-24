@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FileRow } from "./FileRow";
 import { useStore } from "./store";
@@ -32,6 +33,18 @@ export default function App() {
         useStore.getState().fileDone(e.payload.index, e.payload.ok, e.payload.error),
       ),
       listen<Summary>("batch:done", (e) => useStore.getState().batchDone(e.payload)),
+      // Drag-and-drop videos anywhere on the window; scan_files skips non-videos.
+      getCurrentWebview().onDragDropEvent(async (event) => {
+        if (event.payload.type !== "drop") return;
+        const st = useStore.getState();
+        if (st.converting || event.payload.paths.length === 0) return;
+        try {
+          const files = await invoke<VideoFile[]>("scan_files", { paths: event.payload.paths });
+          st.addFiles(files);
+        } catch {
+          // non-video drops are silently ignored
+        }
+      }),
     ];
     return () => {
       subs.forEach((p) => p.then((un) => un()));
@@ -83,7 +96,7 @@ export default function App() {
     s.startBatch();
     try {
       await invoke("start_batch", {
-        items: s.files.map((f) => ({ path: f.path, duration: f.duration, trim: f.trim })),
+        items: s.files.map((f) => ({ path: f.path, duration: f.duration, trims: f.trims })),
         preset: s.preset,
         outDir: s.outDir,
       });
@@ -161,7 +174,7 @@ export default function App() {
               disabled={scanning}
               className="text-sm text-emerald-400 hover:text-emerald-300 disabled:opacity-60"
             >
-              …or pick individual videos
+              …or pick individual videos — dropping them anywhere here works too
             </button>
           </div>
         ) : (
