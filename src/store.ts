@@ -25,14 +25,19 @@ type Store = {
   folder: string | null;
   files: FileState[];
   preset: Preset;
-  /** Preset the running/last batch used (so "Open output folder" stays correct). */
+  /** Custom output folder; null = `whatsapp_{preset}` next to each video. */
+  outDir: string | null;
+  /** Preset/outDir the running/last batch used (so "Open output folder" stays correct). */
   batchPreset: Preset;
+  batchOutDir: string | null;
   converting: boolean;
   summary: Summary | null;
   ffmpegError: string | null;
   setFfmpegError: (e: string | null) => void;
   setFolder: (folder: string, files: VideoFile[]) => void;
+  addFiles: (files: VideoFile[]) => void;
   setPreset: (p: Preset) => void;
+  setOutDir: (d: string | null) => void;
   setTrim: (path: string, trim: Trim | null) => void;
   startBatch: () => void;
   fileStart: (index: number) => void;
@@ -45,7 +50,9 @@ export const useStore = create<Store>((set) => ({
   folder: null,
   files: [],
   preset: "480p",
+  outDir: null,
   batchPreset: "480p",
+  batchOutDir: null,
   converting: false,
   summary: null,
   ffmpegError: null,
@@ -59,7 +66,18 @@ export const useStore = create<Store>((set) => ({
       files: files.map((f) => ({ ...f, trim: null, status: "queued", percent: 0, error: null })),
     }),
 
+  addFiles: (files) =>
+    set((s) => {
+      const known = new Set(s.files.map((f) => f.path));
+      const fresh = files
+        .filter((f) => !known.has(f.path))
+        .map((f) => ({ ...f, trim: null, status: "queued" as const, percent: 0, error: null }));
+      return { summary: null, files: [...s.files, ...fresh] };
+    }),
+
   setPreset: (preset) => set({ preset }),
+
+  setOutDir: (outDir) => set({ outDir }),
 
   setTrim: (path, trim) =>
     set((s) => ({ files: s.files.map((f) => (f.path === path ? { ...f, trim } : f)) })),
@@ -69,6 +87,7 @@ export const useStore = create<Store>((set) => ({
       converting: true,
       summary: null,
       batchPreset: s.preset,
+      batchOutDir: s.outDir,
       files: s.files.map((f) => ({ ...f, status: "queued", percent: 0, error: null })),
     })),
 

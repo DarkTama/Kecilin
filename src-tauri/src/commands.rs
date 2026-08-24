@@ -185,8 +185,33 @@ pub async fn check_ffmpeg(app: AppHandle) -> Result<String, String> {
     Ok(stdout.lines().next().unwrap_or("ffmpeg").to_string())
 }
 
-/// List videos at the top level of `path` (non-recursive, same as the script),
-/// with duration parsed from ffmpeg's own header output — no ffprobe needed.
+fn is_video(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| VIDEO_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Probe durations for already-vetted files. Duration comes from ffmpeg's own
+/// header output — no ffprobe needed; ffmpeg exits non-zero without an output
+/// file but the header still prints.
+async fn probe_files(
+    app: &AppHandle,
+    found: Vec<(PathBuf, String, u64)>,
+) -> Result<Vec<VideoFile>, String> {
+    let mut files = Vec::with_capacity(found.len());
+    for (p, name, size) in found {
+        let path_str = p.to_str().unwrap().to_string(); // UTF-8 checked by callers
+        let duration = match ffmpeg(app)?.args(["-hide_banner", "-i", &path_str]).output().await {
+            Ok(out) => parse_duration_secs(&String::from_utf8_lossy(&out.stderr)),
+            Err(_) => None,
+        };
+        files.push(VideoFile { path: path_str, name, size, duration });
+    }
+    Ok(files)
+}
+
+/// List videos at the top level of `path` (non-recursive, same as the script).
 #[tauri::command]
 pub async fn scan_directory(app: AppHandle, path: String) -> Result<Vec<VideoFile>, String> {
     let mut found: Vec<(PathBuf, String, u64)> = Vec::new();
@@ -196,16 +221,8 @@ pub async fn scan_directory(app: AppHandle, path: String) -> Result<Vec<VideoFil
             Err(_) => continue,
         };
         let p = entry.path();
-        if !p.is_file() {
-            continue;
-        }
-        let is_video = p
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| VIDEO_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-            .unwrap_or(false);
         // Non-UTF-8 paths can't cross the IPC/argument boundary; skip them.
-        if !is_video || p.to_str().is_none() {
+        if !p.is_file() || !is_video(&p) || p.to_str().is_none() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -213,18 +230,27 @@ pub async fn scan_directory(app: AppHandle, path: String) -> Result<Vec<VideoFil
         found.push((p, name, size));
     }
     found.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    probe_files(&app, found).await
+}
 
-    let mut files = Vec::with_capacity(found.len());
-    for (p, name, size) in found {
-        let path_str = p.to_str().unwrap().to_string(); // UTF-8 checked above
-        // ffmpeg exits non-zero without an output file; the header still prints.
-        let duration = match ffmpeg(&app)?.args(["-hide_banner", "-i", &path_str]).output().await {
-            Ok(out) => parse_duration_secs(&String::from_utf8_lossy(&out.stderr)),
-            Err(_) => None,
-        };
-        files.push(VideoFile { path: path_str, name, size, duration });
+/// Probe individually picked files (from the file dialog); non-videos and
+/// missing paths are silently skipped. Order is preserved.
+#[tauri::command]
+pub async fn scan_files(app: AppHandle, paths: Vec<String>) -> Result<Vec<VideoFile>, String> {
+    let mut found: Vec<(PathBuf, String, u64)> = Vec::new();
+    for path in paths {
+        let p = PathBuf::from(&path);
+        if !p.is_file() || !is_video(&p) || p.to_str().is_none() {
+            continue;
+        }
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        found.push((p, name, size));
     }
-    Ok(files)
+    probe_files(&app, found).await
 }
 
 /// Kick off a sequential batch conversion. Returns immediately; progress and
@@ -235,6 +261,7 @@ pub fn start_batch(
     state: State<'_, BatchState>,
     items: Vec<BatchItem>,
     preset: String,
+    out_dir: Option<String>,
 ) -> Result<(), String> {
     let p = preset_by_name(&preset).ok_or_else(|| format!("unknown preset: {preset}"))?;
     if items.is_empty() {
@@ -245,7 +272,7 @@ pub fn start_batch(
     }
     state.cancel.store(false, Ordering::SeqCst);
     let app2 = app.clone();
-    tauri::async_runtime::spawn(async move { run_batch(app2, items, p).await });
+    tauri::async_runtime::spawn(async move { run_batch(app2, items, p, out_dir).await });
     Ok(())
 }
 
@@ -254,15 +281,31 @@ pub fn cancel_batch(state: State<'_, BatchState>) {
     state.abort();
 }
 
-/// Open the batch output folder in the file manager.
+/// Open the batch output folder in the file manager. `anchor` is any converted
+/// file's input path; with no custom `out_dir` the output sits next to it.
 #[tauri::command]
-pub fn open_output_folder(folder: String, preset: String) -> Result<(), String> {
+pub fn open_output_folder(
+    anchor: String,
+    preset: String,
+    out_dir: Option<String>,
+) -> Result<(), String> {
     let p = preset_by_name(&preset).ok_or_else(|| format!("unknown preset: {preset}"))?;
-    let dir = Path::new(&folder).join(format!("whatsapp_{}", p.name));
+    let dir = match out_dir {
+        Some(d) => PathBuf::from(d),
+        None => Path::new(&anchor)
+            .parent()
+            .ok_or("no parent folder")?
+            .join(format!("whatsapp_{}", p.name)),
+    };
     tauri_plugin_opener::open_path(dir, None::<&str>).map_err(|e| e.to_string())
 }
 
-async fn run_batch(app: AppHandle, items: Vec<BatchItem>, preset: &'static Preset) {
+async fn run_batch(
+    app: AppHandle,
+    items: Vec<BatchItem>,
+    preset: &'static Preset,
+    out_dir: Option<String>,
+) {
     let mut converted = 0u32;
     let mut failed = 0u32;
     for (index, item) in items.iter().enumerate() {
@@ -270,7 +313,7 @@ async fn run_batch(app: AppHandle, items: Vec<BatchItem>, preset: &'static Prese
             break;
         }
         let _ = app.emit("file:start", FileStart { index });
-        match convert_one(&app, item, preset, index).await {
+        match convert_one(&app, item, preset, out_dir.as_deref(), index).await {
             Ok(()) => {
                 converted += 1;
                 let _ = app.emit("file:done", FileDone { index, ok: true, error: None });
@@ -291,18 +334,28 @@ async fn run_batch(app: AppHandle, items: Vec<BatchItem>, preset: &'static Prese
     let _ = app.emit("batch:done", BatchDone { converted, failed, canceled });
 }
 
+/// Where a converted file lands: inside the custom output dir if set, else in
+/// `whatsapp_{preset}` next to the input (the script's layout).
+pub(crate) fn output_path(input: &Path, preset: &Preset, out_dir: Option<&str>) -> Option<PathBuf> {
+    let stem = input.file_stem()?.to_string_lossy();
+    let dir = match out_dir {
+        Some(d) => PathBuf::from(d),
+        None => input.parent()?.join(format!("whatsapp_{}", preset.name)),
+    };
+    Some(dir.join(format!("{}_whatsapp_{}.mp4", stem, preset.name)))
+}
+
 async fn convert_one(
     app: &AppHandle,
     item: &BatchItem,
     preset: &Preset,
+    out_dir: Option<&str>,
     index: usize,
 ) -> Result<(), String> {
     let input = Path::new(&item.path);
-    let parent = input.parent().ok_or("file has no parent folder")?;
-    let stem = input.file_stem().ok_or("file has no name")?.to_string_lossy();
-    let out_dir = parent.join(format!("whatsapp_{}", preset.name));
-    fs::create_dir_all(&out_dir).map_err(|e| format!("cannot create output folder: {e}"))?;
-    let out_path = out_dir.join(format!("{}_whatsapp_{}.mp4", stem, preset.name));
+    let out_path = output_path(input, preset, out_dir).ok_or("file has no name or parent")?;
+    let dir = out_path.parent().ok_or("output has no parent folder")?;
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create output folder: {e}"))?;
     let out_str = out_path.to_str().ok_or("output path is not valid UTF-8")?.to_string();
 
     // Progress denominator: the trimmed range if set, else the scanned duration.
@@ -439,6 +492,20 @@ mod tests {
         assert_eq!(parse_progress_us("out_time_us=-9223372036854775808"), Some(0));
         assert_eq!(parse_progress_us("out_time_ms=N/A"), None);
         assert_eq!(parse_progress_us("progress=end"), None);
+    }
+
+    #[test]
+    fn output_path_default_and_override() {
+        let p = preset_by_name("480p").unwrap();
+        let input = Path::new("D:\\vids\\clip.mkv");
+        assert_eq!(
+            output_path(input, p, None).unwrap(),
+            Path::new("D:\\vids\\whatsapp_480p\\clip_whatsapp_480p.mp4")
+        );
+        assert_eq!(
+            output_path(input, p, Some("E:\\out")).unwrap(),
+            Path::new("E:\\out\\clip_whatsapp_480p.mp4")
+        );
     }
 
     #[test]

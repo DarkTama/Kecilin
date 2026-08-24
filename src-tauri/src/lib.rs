@@ -13,6 +13,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::check_ffmpeg,
             commands::scan_directory,
+            commands::scan_files,
             commands::start_batch,
             commands::cancel_batch,
             commands::open_output_folder,

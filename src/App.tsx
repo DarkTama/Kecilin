@@ -13,6 +13,8 @@ const PRESETS: { id: Preset; hint: string }[] = [
   { id: "720p", hint: "better quality, gameplay-friendly" },
 ];
 
+const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "avi", "webm"];
+
 export default function App() {
   const s = useStore();
   const [scanning, setScanning] = useState(false);
@@ -51,6 +53,31 @@ export default function App() {
     }
   }
 
+  async function pickFiles() {
+    setUiError(null);
+    const sel = await open({
+      multiple: true,
+      title: "Choose videos",
+      filters: [{ name: "Videos", extensions: VIDEO_EXTENSIONS }],
+    });
+    const paths = Array.isArray(sel) ? sel : typeof sel === "string" ? [sel] : [];
+    if (paths.length === 0) return;
+    setScanning(true);
+    try {
+      const files = await invoke<VideoFile[]>("scan_files", { paths });
+      s.addFiles(files);
+    } catch (e) {
+      setUiError(String(e));
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function pickOutDir() {
+    const dir = await open({ directory: true, title: "Choose output folder" });
+    if (typeof dir === "string") s.setOutDir(dir);
+  }
+
   async function convert() {
     setUiError(null);
     s.startBatch();
@@ -58,6 +85,7 @@ export default function App() {
       await invoke("start_batch", {
         items: s.files.map((f) => ({ path: f.path, duration: f.duration, trim: f.trim })),
         preset: s.preset,
+        outDir: s.outDir,
       });
     } catch (e) {
       setUiError(String(e));
@@ -65,10 +93,15 @@ export default function App() {
     }
   }
 
+  const hasQueue = s.folder !== null || s.files.length > 0;
   const total = s.files.length;
   const finished = s.files.filter((f) => f.status === "done" || f.status === "failed").length;
   const running = s.files.find((f) => f.status === "running");
   const overall = total ? ((finished + (running ? running.percent / 100 : 0)) / total) * 100 : 0;
+  const doneFile = s.files.find((f) => f.status === "done");
+  const outLabel = s.outDir
+    ? (s.outDir.split(/[\\/]/).filter(Boolean).pop() ?? s.outDir)
+    : `whatsapp_${s.preset}`;
 
   return (
     <div className="min-h-screen">
@@ -80,14 +113,23 @@ export default function App() {
             </h1>
             <p className="text-sm text-slate-400">Shrink videos until WhatsApp behaves.</p>
           </div>
-          {s.folder && !s.converting && (
-            <button
-              onClick={pickFolder}
-              disabled={scanning}
-              className="text-sm text-emerald-400 hover:text-emerald-300"
-            >
-              {scanning ? "Scanning…" : "Change folder…"}
-            </button>
+          {hasQueue && !s.converting && (
+            <div className="flex gap-4 text-sm">
+              <button
+                onClick={pickFiles}
+                disabled={scanning}
+                className="text-emerald-400 hover:text-emerald-300"
+              >
+                Add files…
+              </button>
+              <button
+                onClick={pickFolder}
+                disabled={scanning}
+                className="text-emerald-400 hover:text-emerald-300"
+              >
+                {scanning ? "Scanning…" : s.folder ? "Change folder…" : "Scan folder…"}
+              </button>
+            </div>
           )}
         </header>
 
@@ -102,22 +144,33 @@ export default function App() {
           </div>
         )}
 
-        {!s.folder ? (
-          <button
-            onClick={pickFolder}
-            disabled={scanning}
-            className="rounded-2xl border-2 border-dashed border-slate-700 bg-slate-900/50 px-6 py-16 text-lg font-medium hover:border-emerald-600 hover:bg-slate-900 disabled:opacity-60"
-          >
-            {scanning ? "Scanning…" : "📁 Choose a folder with videos"}
-            <span className="mt-2 block text-sm font-normal text-slate-400">
-              Scans the top level for .mp4 .mov .mkv .avi .webm
-            </span>
-          </button>
+        {!hasQueue ? (
+          <div className="flex flex-col gap-3">
+            <button
+              onClick={pickFolder}
+              disabled={scanning}
+              className="rounded-2xl border-2 border-dashed border-slate-700 bg-slate-900/50 px-6 py-14 text-lg font-medium hover:border-emerald-600 hover:bg-slate-900 disabled:opacity-60"
+            >
+              {scanning ? "Scanning…" : "📁 Choose a folder with videos"}
+              <span className="mt-2 block text-sm font-normal text-slate-400">
+                Scans the top level for {VIDEO_EXTENSIONS.map((e) => `.${e}`).join(" ")}
+              </span>
+            </button>
+            <button
+              onClick={pickFiles}
+              disabled={scanning}
+              className="text-sm text-emerald-400 hover:text-emerald-300 disabled:opacity-60"
+            >
+              …or pick individual videos
+            </button>
+          </div>
         ) : (
           <>
-            <div className="truncate text-xs text-slate-500" title={s.folder}>
-              {s.folder}
-            </div>
+            {s.folder && (
+              <div className="truncate text-xs text-slate-500" title={s.folder}>
+                {s.folder}
+              </div>
+            )}
 
             <div className="grid grid-cols-3 gap-3">
               {PRESETS.map((p) => (
@@ -135,6 +188,31 @@ export default function App() {
                   <div className="text-xs text-slate-400">{p.hint}</div>
                 </button>
               ))}
+            </div>
+
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              <span className="shrink-0">Output:</span>
+              <span className="min-w-0 truncate" title={s.outDir ?? undefined}>
+                {s.outDir ?? `whatsapp_${s.preset} inside each video's folder`}
+              </span>
+              {!s.converting && (
+                <>
+                  <button
+                    onClick={pickOutDir}
+                    className="shrink-0 text-emerald-400 hover:text-emerald-300"
+                  >
+                    Change…
+                  </button>
+                  {s.outDir && (
+                    <button
+                      onClick={() => s.setOutDir(null)}
+                      className="shrink-0 text-slate-500 hover:text-slate-300"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </>
+              )}
             </div>
 
             {s.files.length === 0 ? (
@@ -155,7 +233,7 @@ export default function App() {
                 disabled={!!s.ffmpegError}
                 className="rounded-xl bg-emerald-600 px-4 py-3 font-semibold text-white hover:bg-emerald-500 disabled:opacity-40"
               >
-                Convert {total} video{total > 1 ? "s" : ""} → whatsapp_{s.preset}
+                Convert {total} video{total > 1 ? "s" : ""} → {outLabel}
               </button>
             )}
 
@@ -188,10 +266,14 @@ export default function App() {
                     <span className="text-red-400">, {s.summary.failed} failed</span>
                   )}
                 </span>
-                {s.summary.converted > 0 && (
+                {doneFile && (
                   <button
                     onClick={() =>
-                      invoke("open_output_folder", { folder: s.folder, preset: s.batchPreset })
+                      invoke("open_output_folder", {
+                        anchor: doneFile.path,
+                        preset: s.batchPreset,
+                        outDir: s.batchOutDir,
+                      })
                     }
                     className="font-medium text-emerald-400 hover:text-emerald-300"
                   >

@@ -15,7 +15,8 @@
   | 480p | 22 | 2200k | balanced small |
   | 720p | 20 | 4200k | better quality, gameplay |
 
-- **Trim with two drag handles** — per file, optional, and frame-accurate (the app re-encodes anyway, so no keyframe snapping).
+- **Trim with two drag handles** — per file, optional, and frame-accurate (the app re-encodes anyway, so no keyframe snapping). The preview has play/pause and a live playhead marker.
+- **Files or folders, output anywhere** — add individual videos alongside folder scans, and optionally redirect all output to a folder of your choice.
 - **Real progress bars** — per file and per batch; a failed file is marked and the batch keeps going.
 - **Self-contained** — ffmpeg ships inside as a Tauri sidecar; nothing to install.
 

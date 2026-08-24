@@ -68,6 +68,8 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
   // preview can't load we fall back to the slider + typed times alone.
   const [canPreview, setCanPreview] = useState(true);
   const [duration, setDuration] = useState<number | null>(file.duration);
+  const [playing, setPlaying] = useState(false);
+  const [playhead, setPlayhead] = useState<number | null>(null);
   const initStart = file.trim?.start ?? 0;
   const initEnd = file.trim?.end ?? file.duration ?? 0;
   const [start, setStart] = useState(initStart);
@@ -114,6 +116,8 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           src={convertFileSrc(file.path)}
           className="max-h-64 w-full rounded-lg bg-black"
           onError={() => setCanPreview(false)}
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
           onLoadedMetadata={(e) => {
             const v = e.currentTarget;
             if (Number.isFinite(v.duration)) {
@@ -123,6 +127,7 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           }}
           onTimeUpdate={(e) => {
             const v = e.currentTarget;
+            setPlayhead(v.currentTime);
             if (!v.paused && v.currentTime >= end) v.pause();
           }}
         />
@@ -137,6 +142,7 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           duration={duration}
           start={start}
           end={end}
+          playhead={canPreview ? playhead : null}
           onChange={(ns, ne, moved) => update(ns, ne, moved === "start" ? ns : ne)}
         />
       )}
@@ -146,15 +152,22 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           <button
             onClick={() => {
               const v = videoRef.current;
-              if (v) {
-                v.currentTime = start;
-                v.play();
+              if (!v) return;
+              if (playing) {
+                v.pause();
+                return;
               }
+              // Resume from where it paused; restart when outside the range.
+              if (v.currentTime < start || v.currentTime >= end - 0.05) v.currentTime = start;
+              v.play();
             }}
-            className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800"
+            className="w-32 rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800"
           >
-            ▶ Play range
+            {playing ? "⏸ Pause" : "▶ Play range"}
           </button>
+        )}
+        {canPreview && playhead != null && (
+          <span className="tabular-nums text-xs text-slate-400">at {fmtTime(playhead)}</span>
         )}
         <label className="flex items-center gap-1.5 text-slate-300">
           from
@@ -216,11 +229,13 @@ function RangeSlider({
   duration,
   start,
   end,
+  playhead,
   onChange,
 }: {
   duration: number;
   start: number;
   end: number;
+  playhead?: number | null;
   onChange: (start: number, end: number, moved: "start" | "end") => void;
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
@@ -252,6 +267,12 @@ function RangeSlider({
         className="absolute top-1/2 h-1.5 -translate-y-1/2 rounded bg-emerald-500/70"
         style={{ left: `${pct(start)}%`, width: `${Math.max(0, pct(end) - pct(start))}%` }}
       />
+      {playhead != null && (
+        <div
+          className="pointer-events-none absolute top-0.5 bottom-0.5 w-0.5 rounded bg-white/80"
+          style={{ left: `${pct(Math.min(duration, Math.max(0, playhead)))}%` }}
+        />
+      )}
       {(["start", "end"] as const).map((which) => (
         <div
           key={which}
