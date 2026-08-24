@@ -42,8 +42,15 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 - Cancel the batch mid-run.
 - Sidecar self-check on launch (run `ffmpeg -version`, surface a clear error if broken).
 
+### v1.x — quality of life
+
+- **Trim preview controls** — a pause/resume button on the preview, and a playhead marker: the current second as a moving line on the range slider plus a numeric time readout.
+- **Pick individual files** — convert chosen files, not only a whole folder: a file picker next to the folder picker; the queue mixes both. (Drag-and-drop onto the window stays v2.)
+- **Custom output folder** — optional override for where converted files land; the default stays `whatsapp_{preset}` inside the source folder (the script contract).
+
 ### v2+
 
+- **Per-file preview** — a thumbnail for every file in the queue (one ffmpeg frame grab at scan time, cached) and click-to-play right from the row, not only inside the trim editor.
 - **Multi-part trim** — split one video into multiple exported segments: the per-file trim editor grows from one range to a list of ranges; each range is its own ffmpeg run (the existing `-ss`/`-t` invocation, unchanged), output as `{name}_whatsapp_{preset}_part1.mp4`, `_part2`, … Batch progress counts segments, not files.
 - Parallel conversion (Tokio pool up to core count — mostly pays off for many short clips).
 - Drag-and-drop individual files onto the window.
@@ -73,6 +80,10 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 4. ✅ **M3 — UI**: folder picker, preset picker, queue view, progress bars wired to events.
 5. ✅ **M4 — Trim**: durations at scan time, per-file range slider (+ preview where the webview can play the format), `-ss`/`-t` wired into the encode.
 6. ✅ **M5 — Polish**: cancel, failure states, batch summary, empty-folder handling.
+
+## Known issues
+
+- **Trim preview renders black while audio plays, on some AMD GPUs** — reported on a Ryzen 5 5600G + RX 6700 XT machine; the same build previews fine on the dev machine. This is the WebView2/Chromium hardware video-overlay path (MPO / DirectComposition) misbehaving with some AMD driver combos, not a file or app bug — conversions are unaffected (the encode never touches the webview). Mitigation order: update the AMD driver and WebView2 runtime on the affected machine; if it persists, ship `"additionalBrowserArguments": "--disable-direct-composition-video-overlays"` on the window in `tauri.conf.json` to force video off the overlay path. The range slider + typed times keep trimming fully usable meanwhile.
 
 ## Settled (were open questions)
 
