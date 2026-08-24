@@ -55,12 +55,25 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 - ✅ **Multi-part trim** — the trim editor holds a list of ranges ("+ Add part"); each range is its own ffmpeg run (the `-ss`/`-t` invocation unchanged), output as `{name}_whatsapp_{preset}_part1.mp4`, `_part2`, … One range keeps the plain (no suffix) name. The row's progress bar aggregates across the file's parts.
 - ✅ Drag-and-drop videos onto the window (mixes with folder scans and the file picker).
 
+### Next up — QoL round 2 (planned, from usage feedback)
+
+- **Remove from queue** — an × on each row to unselect a video, plus a "Clear queue" action; today the only way out is rescanning.
+- **Version info in the app** — show the current version in a footer (`getVersion()`), clicking it opens the releases page; pairs with the existing launch update check.
+- **Result stats** — done rows show output size and savings ("205.6 MB → 24.1 MB, −88%"); the batch summary shows total space saved. (Data is free: stat the output after each file.)
+- **Reveal converted file** — a button on a done row that opens/reveals its own output in Explorer (not just the folder).
+- **Batch-finished notification** — a Windows toast when the batch ends while the window is unfocused; conversions run for minutes and people tab away.
+- **Remember preferences** — persist preset, custom output folder, and window size across runs (small settings file, same plugin-store approach as AnyLeap).
+
 ### Later
 
 - Parallel conversion (Tokio pool up to core count — mostly pays off for many short clips).
+- **Skip current file** during a batch (in addition to Cancel-all) — one stuck/wrong file shouldn't cost the whole run.
+- **ETA on the batch bar** — estimate remaining time from encode speed so far.
 - Custom preset editor / advanced flags.
 - Optional GPU encode (NVENC) for speed at some quality cost.
-- Recursive folder scan; smarter overwrite policy.
+- Recursive folder scan; smarter overwrite policy (skip/ask instead of silent `-y`).
+- **In-app auto-update** — download-and-install via the Tauri updater instead of today's notify-and-open-releases.
+- **Bahasa Indonesia UI** — a language toggle; the app's audience (and name) is Indonesian.
 - macOS / Linux builds.
 
 ### Non-goals
