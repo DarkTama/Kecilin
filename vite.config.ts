@@ -13,20 +13,16 @@ export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
     tailwindcss(),
-    {
-      name: "kecilin-coi-inject",
-      // SharedArrayBuffer (multithreaded wasm) needs COOP/COEP headers, which
-      // GitHub Pages can't set — coi-serviceworker injects them client-side.
-      transformIndexHtml(html: string) {
-        return mode === "web"
-          ? html.replace(
-              "</title>",
-              '</title>\n    <script src="/Kecilin/coi-serviceworker.min.js"></script>',
-            )
-          : html;
-      },
-    },
   ],
+
+  // Local `vite preview` mirrors GitHub Pages + coi-serviceworker isolation,
+  // so the multithreaded wasm path is testable locally.
+  preview: {
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+  },
 
   // Vite options tailored for Tauri development:
   // 1. prevent Vite from obscuring rust errors

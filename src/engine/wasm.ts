@@ -12,7 +12,6 @@ const MOUNT = "/input";
 const sourceFiles = new Map<string, File>(); // id -> File
 const mediaUrls = new Map<string, string>();
 let ffmpeg: FFmpeg | null = null;
-let multithreaded = false;
 let events: BatchEvents | null = null;
 let running = false;
 let cancelled = false;
@@ -22,12 +21,12 @@ const base = import.meta.env.BASE_URL;
 async function load(): Promise<FFmpeg> {
   if (ffmpeg) return ffmpeg;
   const f = new FFmpeg();
-  multithreaded = typeof SharedArrayBuffer !== "undefined" && crossOriginIsolated;
-  const dir = multithreaded ? "core-mt" : "core";
+  // Single-thread core, deliberately: core-mt wedges on repeat execs with
+  // WORKERFS mounts (probe hangs / thumbnails+converts die after the first
+  // run — reproduced against 0.12.x). Revisit when upstream stabilizes.
   await f.load({
-    coreURL: `${base}ffmpeg/${dir}/ffmpeg-core.js`,
-    wasmURL: `${base}ffmpeg/${dir}/ffmpeg-core.wasm`,
-    ...(multithreaded ? { workerURL: `${base}ffmpeg/${dir}/ffmpeg-core.worker.js` } : {}),
+    coreURL: `${base}ffmpeg/core/ffmpeg-core.js`,
+    wasmURL: `${base}ffmpeg/core/ffmpeg-core.wasm`,
     classWorkerURL: `${base}ffmpeg/class/worker.js`,
   });
   ffmpeg = f;
@@ -195,9 +194,7 @@ export const wasmEngine: Engine = {
 
   async check() {
     await load();
-    return multithreaded
-      ? "ffmpeg.wasm ready (multithreaded)"
-      : "ffmpeg.wasm ready (single-threaded — slower)";
+    return "ffmpeg.wasm ready";
   },
   version: async () => __APP_VERSION__,
   checkForUpdates: () => {}, // the site is always the latest version

@@ -246,6 +246,12 @@ export default function App() {
               })}
             </div>
 
+            {!engine.caps.outputFolder && (
+              <div className="text-xs text-slate-500">
+                Output: your browser's Downloads — click <b>Save</b> on each finished video. (The
+                desktop app can write straight into folders you pick.)
+              </div>
+            )}
             {engine.caps.outputFolder && (
               <div className="flex items-center gap-2 text-xs text-slate-400">
                 <span className="shrink-0">Output:</span>

@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "kecilin"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clipboard-win",
  "serde",
