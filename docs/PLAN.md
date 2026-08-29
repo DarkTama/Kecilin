@@ -69,6 +69,22 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 - ✅ **Hand off results** — drag the done row's thumbnail out of the app (tauri-plugin-drag; multi-part drags all parts), or "Copy" puts the file(s) on the clipboard via `clipboard-win` for Ctrl+V.
 - ✅ **Trim precision** — arrow keys nudge the focused handle (Shift = 1 s), Space toggles play/pause, and clicking/dragging the timeline seeks the playhead anywhere — playback can start mid-video, outside the selection.
 
+### Next up — audio round (planned; requested by friends, spec vetted)
+
+- **Audio track selection** — for OBS-style multi-track recordings (game audio vs mic). Scan detects the audio track count (count `Audio:` streams in the same ffmpeg header we already parse for duration; add `audioTracks` to the scan result); files with >1 track get a per-file **Audio source** dropdown: *Default / Track N / Merge all*. Selection maps `-map 0:a:{index}` — only detected indices are offered (a missing index hard-fails, so no free-typed numbers); default stays `-map 0:a?`.
+- **Audio track merging** — the *Merge all* choice above. `-filter_complex "[0:a:0][0:a:1]amix=inputs=N:duration=longest:normalize=0[aout]" -map "[aout]"` — explicit input labels, mapped output, and `normalize=0` so amix doesn't quietly halve each source. Once `-filter_complex` is in play, volume/normalize chain *inside* it (not `-af`) — the arg builder owns that switch.
+- **Normalize volume (auto-gain)** — one toggle, implemented with one-pass `loudnorm` (e.g. `I=-16:TP=-1.5:LRA=11`) for phone-friendly loudness; `dynaudnorm` is the fallback if loudnorm disappoints on speech. Chain order: amix → loudnorm → the existing volume option; mute wins over everything.
+
+### Next up — web version (planned): Kecilin on GitHub Pages
+
+Two versions from one repo: the desktop Release (unchanged) **and** a static web app on GitHub Pages. The friend-spec's server-side SaaS (upload → server ffmpeg → download → temp cleanup) is deliberately NOT the design — Pages can't run servers, servers cost money, and uploads are a privacy regression. Instead:
+
+- **Engine: ffmpeg.wasm, fully client-side** — ffmpeg compiled to WebAssembly (GPL core with libx264, same encode flags), running in the visitor's browser. Videos never leave their machine; there is nothing to clean up server-side.
+- **Same UI, swappable engine** — the React app already talks to the backend through a thin `invoke` layer; abstract it into an engine interface (native Tauri vs wasm worker). Desktop-only affordances (reveal, clipboard file copy, drag-out, toasts, window state) hide on web; results download as files.
+- **Performance honesty** — wasm encodes ~10–30× slower than native. Mitigations: multithreaded core via the `coi-serviceworker` trick (Pages can't set the COOP/COEP headers SharedArrayBuffer needs; a service worker injects them), `WORKERFS` mounting so big inputs stream instead of loading into wasm memory, a faster preset default on web, and a visible "the desktop app is much faster" banner linking to Releases. Multi-GB files are out of scope (wasm memory cap).
+- **Inputs on web** — file picker + drag-drop everywhere; folder scanning only where the File System Access API exists (Chromium).
+- **Deploy** — a Pages workflow (`vite build` web target → `actions/deploy-pages`) triggered alongside the release tag, so every version ships as installer + portable + web. THIRD-PARTY-NOTICES gains the wasm ffmpeg build.
+
 ### Later
 
 - Parallel conversion (Tokio pool up to core count — mostly pays off for many short clips).
