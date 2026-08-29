@@ -26,3 +26,17 @@ distributed under its own license.
 Kecilin invokes `ffmpeg.exe` as a separate process (a Tauri sidecar); it is
 not linked into the application. Distribution of the bundled binary is under
 the GPLv3, with the notices and source links above.
+
+## ffmpeg.wasm (web version)
+
+- **Project:** ffmpeg.wasm — <https://github.com/ffmpegwasm/ffmpeg.wasm>
+- **License:** the JS wrapper is MIT; the bundled cores (`@ffmpeg/core`,
+  `@ffmpeg/core-mt`) are FFmpeg compiled to WebAssembly with GPL components
+  (libx264) and are distributed under the **GPLv3** with the same FFmpeg
+  notices as above.
+- **Served files:** the web deployment at GitHub Pages ships these cores under
+  `/ffmpeg/`; they execute entirely in the visitor's browser.
+
+## coi-serviceworker (web version)
+
+- **Project:** <https://github.com/gzuidhof/coi-serviceworker> — MIT license.

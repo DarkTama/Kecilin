@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { startDrag } from "@crabnebula/tauri-plugin-drag";
+import { engine } from "./engine";
 import { fmtSize, fmtTime, parseTime } from "./format";
 import { useStore } from "./store";
 import type { AudioOpt, FileState, Trim } from "./store";
@@ -20,13 +19,10 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
     thumbQueue = thumbQueue.then(async () => {
       if (!live) return;
       try {
-        const p = await invoke<string>("prepare_thumbnail", {
-          path: file.path,
-          duration: file.duration,
-        });
+        const t = await engine.prepareThumbnail(file.path, file.duration);
         if (live) {
-          setThumbRaw(p);
-          setThumb(convertFileSrc(p));
+          setThumbRaw(t.iconPath);
+          setThumb(t.url);
         }
       } catch {
         // no thumbnail — the placeholder stays
@@ -91,7 +87,7 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
 
   async function copyOutputs() {
     try {
-      await invoke("copy_file_to_clipboard", { paths: file.outputs.map((o) => o.path) });
+      await engine.copyFiles(file.outputs.map((o) => o.path));
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -105,12 +101,19 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
         <button
           onClick={() => setEditing(!editing)}
           disabled={converting}
-          title={done ? "Preview / trim — drag me to share the converted file" : "Preview / trim"}
-          draggable={done && thumbRaw != null}
+          title={
+            done && engine.caps.dragOut
+              ? "Preview / trim — drag me to share the converted file"
+              : "Preview / trim"
+          }
+          draggable={done && engine.caps.dragOut && thumbRaw != null}
           onDragStart={(e) => {
             e.preventDefault();
-            if (done && thumbRaw) {
-              void startDrag({ item: file.outputs.map((o) => o.path), icon: thumbRaw });
+            if (done && engine.caps.dragOut && thumbRaw) {
+              engine.dragOut(
+                file.outputs.map((o) => o.path),
+                thumbRaw,
+              );
             }
           }}
           className="h-10 w-[71px] shrink-0 overflow-hidden rounded-md bg-slate-950 disabled:opacity-60"
@@ -135,20 +138,35 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
         {badge}
         {done && !converting && (
           <>
-            <button
-              onClick={() => invoke("reveal_file", { path: file.outputs[0].path })}
-              title="Show the converted file in Explorer"
-              className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs hover:bg-slate-800"
-            >
-              Show
-            </button>
-            <button
-              onClick={copyOutputs}
-              title="Copy the converted file to the clipboard (Ctrl+V to paste)"
-              className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs hover:bg-slate-800"
-            >
-              {copied ? "Copied ✓" : "Copy"}
-            </button>
+            {engine.caps.reveal && (
+              <button
+                onClick={() => engine.revealFile(file.outputs[0].path)}
+                title="Show the converted file in Explorer"
+                className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs hover:bg-slate-800"
+              >
+                Show
+              </button>
+            )}
+            {engine.caps.clipboard && (
+              <button
+                onClick={copyOutputs}
+                title="Copy the converted file to the clipboard (Ctrl+V to paste)"
+                className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs hover:bg-slate-800"
+              >
+                {copied ? "Copied ✓" : "Copy"}
+              </button>
+            )}
+            {engine.caps.downloads &&
+              file.outputs.map((o, i) => (
+                <a
+                  key={o.path}
+                  href={o.path}
+                  download={o.name ?? `${file.name}.mp4`}
+                  className="rounded-lg border border-emerald-700 px-2.5 py-1.5 text-xs text-emerald-300 hover:bg-slate-800"
+                >
+                  Save{file.outputs.length > 1 ? ` ${i + 1}` : ""}
+                </a>
+              ))}
           </>
         )}
         <button
@@ -189,7 +207,7 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
   // Native playback first; when the webview can't decode the file (HEVC
   // without the Windows codec, .mkv/.avi, …) fall back to a small H.264 proxy
   // re-encoded by the bundled ffmpeg. "none" only if even that fails.
-  const [src, setSrc] = useState(() => convertFileSrc(file.path));
+  const [src, setSrc] = useState(() => engine.mediaSrc(file.path));
   const [preview, setPreview] = useState<"native" | "preparing" | "proxy" | "none">("native");
   const triedProxy = useRef(false);
   const [duration, setDuration] = useState<number | null>(file.duration);
@@ -219,8 +237,7 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
     triedProxy.current = true;
     setPreview("preparing");
     try {
-      const p = await invoke<string>("prepare_preview", { path: file.path });
-      setSrc(convertFileSrc(p));
+      setSrc(await engine.preparePreviewProxy(file.path));
       setPreview("proxy");
     } catch {
       setPreview("none");

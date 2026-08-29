@@ -1,23 +1,29 @@
 {
   "name": "kecilin",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:web": "tsc && vite build --mode web && node scripts/copy-wasm.mjs",
     "preview": "vite preview",
+    "test": "vitest run",
     "tauri": "tauri",
     "fetch-binaries": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-binaries.ps1",
     "release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release.ps1",
-    "postinstall": "npm run fetch-binaries"
+    "postinstall": "node scripts/postinstall.mjs"
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "^2",
+    "@ffmpeg/core": "^0.12.6",
+    "@ffmpeg/core-mt": "^0.12.6",
+    "@ffmpeg/ffmpeg": "^0.12.10",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-http": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "coi-serviceworker": "^0.1.7",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "zustand": "^5"
@@ -31,6 +37,7 @@
     "@vitejs/plugin-react": "^4",
     "tailwindcss": "^4",
     "typescript": "~5.8.3",
-    "vite": "^7"
+    "vite": "^7",
+    "vitest": "^3"
   }
 }

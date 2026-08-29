@@ -4,8 +4,29 @@ import tailwindcss from "@tailwindcss/vite";
 
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
+// mode "web" = the GitHub Pages build (ffmpeg.wasm engine, /Kecilin/ base).
+export default defineConfig(({ mode }) => ({
+  base: mode === "web" ? "/Kecilin/" : "/",
+  define: {
+    __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? "dev"),
+  },
+  plugins: [
+    react(),
+    tailwindcss(),
+    {
+      name: "kecilin-coi-inject",
+      // SharedArrayBuffer (multithreaded wasm) needs COOP/COEP headers, which
+      // GitHub Pages can't set — coi-serviceworker injects them client-side.
+      transformIndexHtml(html: string) {
+        return mode === "web"
+          ? html.replace(
+              "</title>",
+              '</title>\n    <script src="/Kecilin/coi-serviceworker.min.js"></script>',
+            )
+          : html;
+      },
+    },
+  ],
 
   // Vite options tailored for Tauri development:
   // 1. prevent Vite from obscuring rust errors
@@ -19,4 +40,4 @@ export default defineConfig({
     // 3. tell Vite to ignore watching `src-tauri`
     watch: { ignored: ["**/src-tauri/**"] },
   },
-});
+}));

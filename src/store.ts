@@ -5,7 +5,7 @@ export type Trim = { start: number; end: number };
 export type Preset = "360p" | "480p" | "720p";
 export type FileStatus = "queued" | "running" | "done" | "failed" | "canceled";
 export type AudioOpt = "keep" | "mute" | "75" | "50" | "25";
-export type OutputFile = { path: string; size: number };
+export type OutputFile = { path: string; size: number; name?: string };
 
 /** "default" = first track, "merge" = mix all tracks, number = track index. */
 export type AudioSource = "default" | "merge" | number;

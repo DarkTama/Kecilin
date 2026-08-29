@@ -1,15 +1,9 @@
 import { useEffect, useState } from "react";
-import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { FileRow } from "./FileRow";
+import { engine, IS_WEB } from "./engine";
 import { fmtSize } from "./format";
 import { useStore } from "./store";
-import { checkForUpdates, RELEASES_PAGE } from "./updateCheck";
-import type { FileState, OutputFile, Preset, Summary, VideoFile } from "./store";
+import type { FileState, Preset } from "./store";
 
 const PRESETS: { id: Preset; hint: string; maxrateKbps: number }[] = [
   { id: "360p", hint: "small, good for long clips", maxrateKbps: 1200 },
@@ -32,48 +26,30 @@ export default function App() {
   const [version, setVersion] = useState("");
 
   useEffect(() => {
-    invoke<string>("check_ffmpeg").catch((e) => useStore.getState().setFfmpegError(String(e)));
-    void checkForUpdates();
-    getVersion().then(setVersion).catch(() => {});
-    const subs = [
-      listen<{ index: number }>("file:start", (e) => useStore.getState().fileStart(e.payload.index)),
-      listen<{ index: number; percent: number }>("file:progress", (e) =>
-        useStore.getState().fileProgress(e.payload.index, e.payload.percent),
-      ),
-      listen<{ index: number; ok: boolean; error: string | null; outputs: OutputFile[] }>(
-        "file:done",
-        (e) =>
-          useStore
-            .getState()
-            .fileDone(e.payload.index, e.payload.ok, e.payload.error, e.payload.outputs),
-      ),
-      listen<Summary>("batch:done", (e) => useStore.getState().batchDone(e.payload)),
-      // Drag-and-drop videos anywhere on the window; scan_files skips non-videos.
-      getCurrentWebview().onDragDropEvent(async (event) => {
-        if (event.payload.type !== "drop") return;
-        const st = useStore.getState();
-        if (st.converting || event.payload.paths.length === 0) return;
-        try {
-          const files = await invoke<VideoFile[]>("scan_files", { paths: event.payload.paths });
-          st.addFiles(files);
-        } catch {
-          // non-video drops are silently ignored
-        }
-      }),
-    ];
+    engine.check().catch((e) => useStore.getState().setFfmpegError(String(e)));
+    engine.checkForUpdates();
+    engine.version().then(setVersion).catch(() => {});
+    const unBatch = engine.onBatchEvents({
+      fileStart: (i) => useStore.getState().fileStart(i),
+      fileProgress: (i, p) => useStore.getState().fileProgress(i, p),
+      fileDone: (i, ok, err, outputs) => useStore.getState().fileDone(i, ok, err, outputs),
+      batchDone: (sum) => useStore.getState().batchDone(sum),
+    });
+    const unDrop = engine.onDrop((files) => {
+      if (!useStore.getState().converting) useStore.getState().addFiles(files);
+    });
     return () => {
-      subs.forEach((p) => p.then((un) => un()));
+      unBatch();
+      unDrop();
     };
   }, []);
 
   async function pickFolder() {
     setUiError(null);
-    const dir = await open({ directory: true, title: "Choose a folder with videos" });
-    if (typeof dir !== "string") return;
     setScanning(true);
     try {
-      const files = await invoke<VideoFile[]>("scan_directory", { path: dir });
-      s.setFolder(dir, files);
+      const res = await engine.pickFolder();
+      if (res) s.setFolder(res.folder, res.files);
     } catch (e) {
       setUiError(String(e));
     } finally {
@@ -83,17 +59,10 @@ export default function App() {
 
   async function pickFiles() {
     setUiError(null);
-    const sel = await open({
-      multiple: true,
-      title: "Choose videos",
-      filters: [{ name: "Videos", extensions: VIDEO_EXTENSIONS }],
-    });
-    const paths = Array.isArray(sel) ? sel : typeof sel === "string" ? [sel] : [];
-    if (paths.length === 0) return;
     setScanning(true);
     try {
-      const files = await invoke<VideoFile[]>("scan_files", { paths });
-      s.addFiles(files);
+      const files = await engine.pickFiles();
+      if (files.length > 0) s.addFiles(files);
     } catch (e) {
       setUiError(String(e));
     } finally {
@@ -102,27 +71,27 @@ export default function App() {
   }
 
   async function pickOutDir() {
-    const dir = await open({ directory: true, title: "Choose output folder" });
-    if (typeof dir === "string") s.setOutDir(dir);
+    const dir = await engine.pickOutDir();
+    if (dir) s.setOutDir(dir);
   }
 
   async function convert() {
     setUiError(null);
     s.startBatch();
     try {
-      await invoke("start_batch", {
-        items: s.files.map((f) => ({
+      await engine.startBatch(
+        s.files.map((f) => ({
           path: f.path,
           duration: f.duration,
           trims: f.trims,
-          audio: f.audio === "keep" ? null : f.audio,
-          audioSource: f.audioSource === "default" ? null : String(f.audioSource),
+          audio: f.audio,
+          audioSource: f.audioSource,
           normalize: f.normalize,
           audioTracks: f.audioTracks,
         })),
-        preset: s.preset,
-        outDir: s.outDir,
-      });
+        s.preset,
+        s.outDir,
+      );
     } catch (e) {
       setUiError(String(e));
       s.batchDone({ converted: 0, failed: 0, canceled: true });
@@ -137,9 +106,10 @@ export default function App() {
   const doneFiles = s.files.filter((f) => f.status === "done" && f.outputs.length > 0);
   const savedIn = doneFiles.reduce((a, f) => a + f.size, 0);
   const savedOut = doneFiles.reduce((a, f) => a + f.outputs.reduce((x, o) => x + o.size, 0), 0);
-  const outLabel = s.outDir
-    ? (s.outDir.split(/[\\/]/).filter(Boolean).pop() ?? s.outDir)
-    : `whatsapp_${s.preset}`;
+  const outLabel =
+    engine.caps.outputFolder && s.outDir
+      ? (s.outDir.split(/[\\/]/).filter(Boolean).pop() ?? s.outDir)
+      : `whatsapp_${s.preset}`;
   // Ceiling estimate: video maxrate + ~160 kbps AAC over the encoded seconds.
   const totalSecs = s.files.reduce((a, f) => a + effectiveSecs(f), 0);
   const estimateBytes = (kbps: number) => ((kbps + 160) * 1000 * totalSecs) / 8;
@@ -163,15 +133,20 @@ export default function App() {
               >
                 Add files…
               </button>
-              <button
-                onClick={pickFolder}
-                disabled={scanning}
-                className="text-emerald-400 hover:text-emerald-300"
-              >
-                {scanning ? "Scanning…" : s.folder ? "Change folder…" : "Scan folder…"}
-              </button>
+              {engine.caps.folders && (
+                <button
+                  onClick={pickFolder}
+                  disabled={scanning}
+                  className="text-emerald-400 hover:text-emerald-300"
+                >
+                  {scanning ? "Scanning…" : s.folder ? "Change folder…" : "Scan folder…"}
+                </button>
+              )}
               {s.files.length > 0 && (
-                <button onClick={() => s.clearQueue()} className="text-slate-500 hover:text-slate-300">
+                <button
+                  onClick={() => s.clearQueue()}
+                  className="text-slate-500 hover:text-slate-300"
+                >
                   Clear queue
                 </button>
               )}
@@ -179,9 +154,24 @@ export default function App() {
           )}
         </header>
 
+        {IS_WEB && (
+          <div className="rounded-xl border border-slate-800 bg-slate-900 px-4 py-3 text-xs text-slate-400">
+            Runs entirely in your browser — <b className="text-slate-300">nothing is uploaded</b>.
+            Encoding here is much slower than the desktop app;{" "}
+            <button
+              onClick={() => engine.openReleases()}
+              className="text-emerald-400 hover:text-emerald-300"
+            >
+              get Kecilin for Windows
+            </button>{" "}
+            for big files and full speed.
+          </div>
+        )}
+
         {s.ffmpegError && (
           <div className="rounded-xl border border-red-800 bg-red-950/60 px-4 py-3 text-sm text-red-200">
-            <b>ffmpeg is missing or broken.</b> {s.ffmpegError}
+            <b>{IS_WEB ? "ffmpeg.wasm failed to load." : "ffmpeg is missing or broken."}</b>{" "}
+            {s.ffmpegError}
           </div>
         )}
         {uiError && (
@@ -193,13 +183,19 @@ export default function App() {
         {!hasQueue ? (
           <div className="flex flex-col gap-3">
             <button
-              onClick={pickFolder}
+              onClick={engine.caps.folders ? pickFolder : pickFiles}
               disabled={scanning}
               className="rounded-2xl border-2 border-dashed border-slate-700 bg-slate-900/50 px-6 py-14 text-lg font-medium hover:border-emerald-600 hover:bg-slate-900 disabled:opacity-60"
             >
-              {scanning ? "Scanning…" : "📁 Choose a folder with videos"}
+              {scanning
+                ? "Scanning…"
+                : engine.caps.folders
+                  ? "📁 Choose a folder with videos"
+                  : "🎬 Choose videos"}
               <span className="mt-2 block text-sm font-normal text-slate-400">
-                Scans the top level for {VIDEO_EXTENSIONS.map((e) => `.${e}`).join(" ")}
+                {engine.caps.folders
+                  ? `Scans the top level for ${VIDEO_EXTENSIONS.map((e) => `.${e}`).join(" ")}`
+                  : `Takes ${VIDEO_EXTENSIONS.map((e) => `.${e}`).join(" ")}`}
               </span>
             </button>
             <button
@@ -250,30 +246,32 @@ export default function App() {
               })}
             </div>
 
-            <div className="flex items-center gap-2 text-xs text-slate-400">
-              <span className="shrink-0">Output:</span>
-              <span className="min-w-0 truncate" title={s.outDir ?? undefined}>
-                {s.outDir ?? `whatsapp_${s.preset} inside each video's folder`}
-              </span>
-              {!s.converting && (
-                <>
-                  <button
-                    onClick={pickOutDir}
-                    className="shrink-0 text-emerald-400 hover:text-emerald-300"
-                  >
-                    Change…
-                  </button>
-                  {s.outDir && (
+            {engine.caps.outputFolder && (
+              <div className="flex items-center gap-2 text-xs text-slate-400">
+                <span className="shrink-0">Output:</span>
+                <span className="min-w-0 truncate" title={s.outDir ?? undefined}>
+                  {s.outDir ?? `whatsapp_${s.preset} inside each video's folder`}
+                </span>
+                {!s.converting && (
+                  <>
                     <button
-                      onClick={() => s.setOutDir(null)}
-                      className="shrink-0 text-slate-500 hover:text-slate-300"
+                      onClick={pickOutDir}
+                      className="shrink-0 text-emerald-400 hover:text-emerald-300"
                     >
-                      Reset
+                      Change…
                     </button>
-                  )}
-                </>
-              )}
-            </div>
+                    {s.outDir && (
+                      <button
+                        onClick={() => s.setOutDir(null)}
+                        className="shrink-0 text-slate-500 hover:text-slate-300"
+                      >
+                        Reset
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
 
             {s.files.length === 0 ? (
               <div className="rounded-xl border border-slate-800 bg-slate-900 px-4 py-8 text-center text-sm text-slate-400">
@@ -309,7 +307,7 @@ export default function App() {
                   {finished}/{total}
                 </span>
                 <button
-                  onClick={() => invoke("cancel_batch")}
+                  onClick={() => engine.cancelBatch()}
                   className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
                 >
                   Cancel
@@ -333,14 +331,10 @@ export default function App() {
                     </span>
                   )}
                 </span>
-                {doneFiles.length > 0 && (
+                {engine.caps.outputFolder && doneFiles.length > 0 && (
                   <button
                     onClick={() =>
-                      invoke("open_output_folder", {
-                        anchor: doneFiles[0].path,
-                        preset: s.batchPreset,
-                        outDir: s.batchOutDir,
-                      })
+                      engine.openOutputFolder(doneFiles[0].path, s.batchPreset, s.batchOutDir)
                     }
                     className="font-medium text-emerald-400 hover:text-emerald-300"
                   >
@@ -353,8 +347,9 @@ export default function App() {
         )}
       </div>
       <footer className="pb-4 text-center text-xs text-slate-600">
-        Kecilin {version && `v${version}`} ·{" "}
-        <button onClick={() => openUrl(RELEASES_PAGE)} className="hover:text-slate-400">
+        Kecilin {version && `v${version}`}
+        {IS_WEB && " (web)"} ·{" "}
+        <button onClick={() => engine.openReleases()} className="hover:text-slate-400">
           releases
         </button>
       </footer>

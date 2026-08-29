@@ -75,15 +75,15 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 - **Audio track merging** — the *Merge all* choice above. `-filter_complex "[0:a:0][0:a:1]amix=inputs=N:duration=longest:normalize=0[aout]" -map "[aout]"` — explicit input labels, mapped output, and `normalize=0` so amix doesn't quietly halve each source. Once `-filter_complex` is in play, volume/normalize chain *inside* it (not `-af`) — the arg builder owns that switch.
 - **Normalize volume (auto-gain)** — one toggle, implemented with one-pass `loudnorm` (e.g. `I=-16:TP=-1.5:LRA=11`) for phone-friendly loudness; `dynaudnorm` is the fallback if loudnorm disappoints on speech. Chain order: amix → loudnorm → the existing volume option; mute wins over everything.
 
-### Next up — web version (planned): Kecilin on GitHub Pages
+### Web version (shipped in v0.6.0): Kecilin on GitHub Pages
 
-Two versions from one repo: the desktop Release (unchanged) **and** a static web app on GitHub Pages. The friend-spec's server-side SaaS (upload → server ffmpeg → download → temp cleanup) is deliberately NOT the design — Pages can't run servers, servers cost money, and uploads are a privacy regression. Instead:
+Two versions from one repo and one tag: the desktop Release (unchanged) **and** a static web app at <https://darktama.github.io/Kecilin/>. The friend-spec's server-side SaaS (upload → server ffmpeg → download → temp cleanup) was deliberately NOT built — Pages can't run servers, servers cost money, and uploads are a privacy regression. What shipped instead:
 
-- **Engine: ffmpeg.wasm, fully client-side** — ffmpeg compiled to WebAssembly (GPL core with libx264, same encode flags), running in the visitor's browser. Videos never leave their machine; there is nothing to clean up server-side.
-- **Same UI, swappable engine** — the React app already talks to the backend through a thin `invoke` layer; abstract it into an engine interface (native Tauri vs wasm worker). Desktop-only affordances (reveal, clipboard file copy, drag-out, toasts, window state) hide on web; results download as files.
-- **Performance honesty** — wasm encodes ~10–30× slower than native. Mitigations: multithreaded core via the `coi-serviceworker` trick (Pages can't set the COOP/COEP headers SharedArrayBuffer needs; a service worker injects them), `WORKERFS` mounting so big inputs stream instead of loading into wasm memory, a faster preset default on web, and a visible "the desktop app is much faster" banner linking to Releases. Multi-GB files are out of scope (wasm memory cap).
-- **Inputs on web** — file picker + drag-drop everywhere; folder scanning only where the File System Access API exists (Chromium).
-- **Deploy** — a Pages workflow (`vite build` web target → `actions/deploy-pages`) triggered alongside the release tag, so every version ships as installer + portable + web. THIRD-PARTY-NOTICES gains the wasm ffmpeg build.
+- ✅ **ffmpeg.wasm, fully client-side** — GPL core with libx264, same encode flags; videos never leave the visitor's browser. Nothing to clean up server-side.
+- ✅ **Same UI, swappable engine** — `src/engine/` defines the interface; `tauri.ts` wraps the native commands, `wasm.ts` runs ffmpeg.wasm (WORKERFS-mounted inputs, MEMFS outputs → blob "Save" links, `terminate()` on cancel). `args.ts` mirrors the Rust arg builder byte-for-byte, held in sync by vitest (`args.test.ts` mirrors the Rust unit tests). Capabilities gate desktop-only affordances (reveal/copy/drag-out/output folder/folder scan hide on web; per-output Save links appear instead).
+- ✅ **Performance honesty** — `veryfast` preset on web, a banner linking to Releases, multithreaded core via `coi-serviceworker` when the browser allows it, single-thread fallback otherwise (the fallback is e2e-verified; multi-GB files remain out of scope — wasm memory cap).
+- Trim/multi-part/fixed-length/audio round/size guidance all work on web; proxy previews and folder scanning are desktop-only (thumbnails still work everywhere — wasm decodes even HEVC for the frame grab).
+- ✅ **Deploy** — `.github/workflows/pages.yml` builds `vite --mode web` + copies the wasm runtime and deploys on every release tag.
 
 ### Later
 
