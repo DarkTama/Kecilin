@@ -1,6 +1,6 @@
 [package]
 name = "kecilin"
-version = "0.4.0"
+version = "0.5.0"
 description = "Kecilin — batch-compress videos into WhatsApp-ready copies"
 authors = ["DarkTama"]
 edition = "2021"

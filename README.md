@@ -20,6 +20,7 @@
 - **Files or folders, output anywhere** — add individual videos via picker or drag-and-drop alongside folder scans, remove them with a click, and optionally redirect all output to a folder of your choice.
 - **From result to WhatsApp in one motion** — done rows show the size saved, reveal in Explorer, copy to clipboard for Ctrl+V, or just drag the thumbnail straight into a chat. A toast fires when a batch finishes in the background.
 - **Guided choices** — each preset shows a worst-case size estimate for your queue, audio can be muted or turned down per file, and 30-second "Status mode" stamps fixed-length parts.
+- **Multi-track audio, handled** — OBS-style recordings with separate game/mic tracks get a per-file source picker (any track, or merge them all), plus one-toggle loudness normalization.
 - **Real progress bars** — per file and per batch; a failed file is marked and the batch keeps going.
 - **Self-contained** — ffmpeg ships inside as a Tauri sidecar; nothing to install.
 

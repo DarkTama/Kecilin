@@ -75,12 +75,18 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
       <span className="text-emerald-400"> · ✂ {file.trims.length} parts</span>
     ) : null;
 
+  const audioNotes = [
+    file.audioSource === "merge"
+      ? "merged audio"
+      : typeof file.audioSource === "number"
+        ? `track ${file.audioSource + 1}`
+        : null,
+    file.normalize ? "normalized" : null,
+    file.audio === "mute" ? "muted" : file.audio !== "keep" ? `vol ${file.audio}%` : null,
+  ].filter(Boolean);
   const audioBadge =
-    file.audio !== "keep" ? (
-      <span className="text-amber-400">
-        {" "}
-        · {file.audio === "mute" ? "muted" : `vol ${file.audio}%`}
-      </span>
+    audioNotes.length > 0 ? (
+      <span className="text-amber-400"> · {audioNotes.join(" · ")}</span>
     ) : null;
 
   async function copyOutputs() {
@@ -177,6 +183,8 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
 function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void }) {
   const setTrims = useStore((st) => st.setTrims);
   const setAudio = useStore((st) => st.setAudio);
+  const setAudioSource = useStore((st) => st.setAudioSource);
+  const setNormalize = useStore((st) => st.setNormalize);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   // Native playback first; when the webview can't decode the file (HEVC
   // without the Windows codec, .mkv/.avi, …) fall back to a small H.264 proxy
@@ -460,6 +468,31 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
             className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums"
           />
         </label>
+        {file.audioTracks > 1 && (
+          <label className="flex items-center gap-1.5 text-slate-300">
+            source
+            <select
+              value={String(file.audioSource)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setAudioSource(
+                  file.path,
+                  v === "default" || v === "merge" ? v : Number(v),
+                );
+              }}
+              title="This recording has multiple audio tracks (e.g. game + mic)"
+              className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1"
+            >
+              <option value="default">track 1 (default)</option>
+              {Array.from({ length: file.audioTracks - 1 }, (_, i) => (
+                <option key={i + 1} value={i + 1}>
+                  track {i + 2}
+                </option>
+              ))}
+              <option value="merge">merge all</option>
+            </select>
+          </label>
+        )}
         <label className="flex items-center gap-1.5 text-slate-300">
           audio
           <select
@@ -473,6 +506,18 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
             <option value="25">25%</option>
             <option value="mute">mute</option>
           </select>
+        </label>
+        <label
+          className="flex items-center gap-1.5 text-slate-300"
+          title="Balance loudness (one-pass loudnorm) — evens out quiet mics and loud game audio"
+        >
+          <input
+            type="checkbox"
+            checked={file.normalize}
+            onChange={(e) => setNormalize(file.path, e.target.checked)}
+            className="accent-emerald-500"
+          />
+          normalize
         </label>
         <span className="text-xs text-slate-500">
           {valid ? `${fmtTime(end - start)} selected` : "end must be after start"}

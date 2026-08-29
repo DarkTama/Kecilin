@@ -7,18 +7,24 @@ export type FileStatus = "queued" | "running" | "done" | "failed" | "canceled";
 export type AudioOpt = "keep" | "mute" | "75" | "50" | "25";
 export type OutputFile = { path: string; size: number };
 
+/** "default" = first track, "merge" = mix all tracks, number = track index. */
+export type AudioSource = "default" | "merge" | number;
+
 /** What `scan_directory`/`scan_files` return per file. */
 export type VideoFile = {
   path: string;
   name: string;
   size: number;
   duration: number | null;
+  audioTracks: number;
 };
 
 export type FileState = VideoFile & {
   /** Zero ranges = whole file; one = plain trim; several = multi-part split. */
   trims: Trim[];
   audio: AudioOpt;
+  audioSource: AudioSource;
+  normalize: boolean;
   /** Converted outputs (path + size), filled when the file finishes. */
   outputs: OutputFile[];
   status: FileStatus;
@@ -49,6 +55,8 @@ type Store = {
   setOutDir: (d: string | null) => void;
   setTrims: (path: string, trims: Trim[]) => void;
   setAudio: (path: string, audio: AudioOpt) => void;
+  setAudioSource: (path: string, audioSource: AudioSource) => void;
+  setNormalize: (path: string, normalize: boolean) => void;
   startBatch: () => void;
   fileStart: (index: number) => void;
   fileProgress: (index: number, percent: number) => void;
@@ -60,6 +68,8 @@ const fresh = (f: VideoFile): FileState => ({
   ...f,
   trims: [],
   audio: "keep",
+  audioSource: "default",
+  normalize: false,
   outputs: [],
   status: "queued",
   percent: 0,
@@ -103,6 +113,12 @@ export const useStore = create<Store>()(
 
       setAudio: (path, audio) =>
         set((s) => ({ files: s.files.map((f) => (f.path === path ? { ...f, audio } : f)) })),
+
+      setAudioSource: (path, audioSource) =>
+        set((s) => ({ files: s.files.map((f) => (f.path === path ? { ...f, audioSource } : f)) })),
+
+      setNormalize: (path, normalize) =>
+        set((s) => ({ files: s.files.map((f) => (f.path === path ? { ...f, normalize } : f)) })),
 
       startBatch: () =>
         set((s) => ({

@@ -52,11 +52,14 @@ impl BatchState {
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct VideoFile {
     path: String,
     name: String,
     size: u64,
     duration: Option<f64>,
+    /// Number of audio streams (OBS multi-track recordings have several).
+    audio_tracks: usize,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -66,6 +69,7 @@ pub struct Trim {
 }
 
 #[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct BatchItem {
     pub path: String,
     pub duration: Option<f64>,
@@ -76,6 +80,15 @@ pub struct BatchItem {
     /// None = keep audio as-is; "mute" = drop the track; "75"/"50"/"25" = volume.
     #[serde(default)]
     pub audio: Option<String>,
+    /// None/"default" = first track; "merge" = mix all tracks; "0","1",… = pick one.
+    #[serde(default)]
+    pub audio_source: Option<String>,
+    /// Loudness-normalize the audio (one-pass loudnorm).
+    #[serde(default)]
+    pub normalize: bool,
+    /// Audio stream count from the scan (needed to build the merge filter).
+    #[serde(default)]
+    pub audio_tracks: usize,
 }
 
 #[derive(Serialize, Clone)]
@@ -110,6 +123,14 @@ struct BatchDone {
     canceled: bool,
 }
 
+/// Count audio streams in ffmpeg's stderr header (`Stream #0:1...: Audio: …`).
+pub(crate) fn parse_audio_tracks(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .filter(|l| l.contains("Stream #") && l.contains("Audio:"))
+        .count()
+}
+
 /// Parse `Duration: HH:MM:SS.cc` from ffmpeg's stderr header. `N/A` → None.
 pub(crate) fn parse_duration_secs(stderr: &str) -> Option<f64> {
     let rest = &stderr[stderr.find("Duration: ")? + "Duration: ".len()..];
@@ -135,17 +156,31 @@ fn push_strs(args: &mut Vec<String>, xs: &[&str]) {
     args.extend(xs.iter().map(|s| s.to_string()));
 }
 
+/// Per-file audio choices, resolved from the queue item.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct AudioOpts<'a> {
+    /// None/"default" = first track (`0:a?`); "merge" = mix all; "0","1",… = pick one.
+    pub source: Option<&'a str>,
+    /// None = keep; "mute" = drop the track; "75"/"50"/"25" = volume.
+    pub level: Option<&'a str>,
+    /// One-pass loudnorm.
+    pub normalize: bool,
+    /// Audio stream count (merge needs it; <2 degrades to default).
+    pub track_count: usize,
+}
+
+const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
+
 /// Build the exact ffmpeg invocation from compress.bat (see docs/ARCHITECTURE.md).
 /// Trim adds `-ss` before `-i` (fast input seek) and `-t` after it; the
 /// `-progress pipe:1 -nostats` pair only affects reporting, not the encode.
-/// `audio`: None/unknown = keep as the script does; "mute" drops the audio
-/// track entirely; "75"/"50"/"25" scale the volume.
+/// Audio: chain order is amix → loudnorm → volume; mute wins over everything.
 pub(crate) fn build_ffmpeg_args(
     input: &str,
     output: &str,
     p: &Preset,
     trim: Option<&Trim>,
-    audio: Option<&str>,
+    audio: AudioOpts,
 ) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into()];
     if let Some(t) = trim {
@@ -157,10 +192,39 @@ pub(crate) fn build_ffmpeg_args(
     }
     let vf = format!("scale=-2:{}:flags=lanczos", p.height);
     let crf = p.crf.to_string();
-    let mute = audio == Some("mute");
+    let mute = audio.level == Some("mute");
+    let merge = audio.source == Some("merge") && audio.track_count >= 2;
+
+    // Post-source audio filters, chained in order.
+    let mut af: Vec<String> = Vec::new();
+    if audio.normalize {
+        af.push(LOUDNORM.to_string());
+    }
+    match audio.level {
+        Some("75") => af.push("volume=0.75".into()),
+        Some("50") => af.push("volume=0.5".into()),
+        Some("25") => af.push("volume=0.25".into()),
+        _ => {}
+    }
+
     push_strs(&mut a, &["-map", "0:v:0"]);
     if !mute {
-        push_strs(&mut a, &["-map", "0:a?"]);
+        if merge {
+            // Explicit input labels; normalize=0 keeps each source at its
+            // recorded level; extra filters chain INSIDE the complex graph.
+            let inputs: String =
+                (0..audio.track_count).map(|i| format!("[0:a:{i}]")).collect();
+            let chain = if af.is_empty() { String::new() } else { format!(",{}", af.join(",")) };
+            let graph = format!(
+                "{inputs}amix=inputs={}:duration=longest:normalize=0{chain}[aout]",
+                audio.track_count
+            );
+            push_strs(&mut a, &["-filter_complex", &graph, "-map", "[aout]"]);
+        } else if let Some(idx) = audio.source.filter(|s| s.chars().all(|c| c.is_ascii_digit())) {
+            push_strs(&mut a, &["-map", &format!("0:a:{idx}")]);
+        } else {
+            push_strs(&mut a, &["-map", "0:a?"]);
+        }
     }
     push_strs(&mut a, &[
         "-vf", &vf,
@@ -174,14 +238,8 @@ pub(crate) fn build_ffmpeg_args(
     if mute {
         push_strs(&mut a, &["-an"]);
     } else {
-        let vol = match audio {
-            Some("75") => Some("0.75"),
-            Some("50") => Some("0.5"),
-            Some("25") => Some("0.25"),
-            _ => None,
-        };
-        if let Some(v) = vol {
-            push_strs(&mut a, &["-af", &format!("volume={v}")]);
+        if !merge && !af.is_empty() {
+            push_strs(&mut a, &["-af", &af.join(",")]);
         }
         push_strs(&mut a, &["-c:a", "aac", "-q:a", "2", "-ar", "48000", "-ac", "2"]);
     }
@@ -237,11 +295,15 @@ async fn probe_files(
     let mut files = Vec::with_capacity(found.len());
     for (p, name, size) in found {
         let path_str = p.to_str().unwrap().to_string(); // UTF-8 checked by callers
-        let duration = match ffmpeg(app)?.args(["-hide_banner", "-i", &path_str]).output().await {
-            Ok(out) => parse_duration_secs(&String::from_utf8_lossy(&out.stderr)),
-            Err(_) => None,
-        };
-        files.push(VideoFile { path: path_str, name, size, duration });
+        let (duration, audio_tracks) =
+            match ffmpeg(app)?.args(["-hide_banner", "-i", &path_str]).output().await {
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    (parse_duration_secs(&stderr), parse_audio_tracks(&stderr))
+                }
+                Err(_) => (None, 0),
+            };
+        files.push(VideoFile { path: path_str, name, size, duration, audio_tracks });
     }
     Ok(files)
 }
@@ -575,7 +637,13 @@ async fn convert_segment(
         .map(|s| s * 1_000_000.0)
         .filter(|v| *v > 0.0);
 
-    let args = build_ffmpeg_args(&item.path, &out_str, preset, trim, item.audio.as_deref());
+    let audio = AudioOpts {
+        source: item.audio_source.as_deref(),
+        level: item.audio.as_deref(),
+        normalize: item.normalize,
+        track_count: item.audio_tracks,
+    };
+    let args = build_ffmpeg_args(&item.path, &out_str, preset, trim, audio);
     let (mut rx, child) = ffmpeg(app)?.args(args).spawn().map_err(|e| e.to_string())?;
 
     let state = app.state::<BatchState>();
@@ -682,7 +750,8 @@ mod tests {
     #[test]
     fn args_match_the_script_exactly() {
         let p = preset_by_name("360p").unwrap();
-        let args = build_ffmpeg_args("in.mp4", "out\\in_whatsapp_360p.mp4", p, None, None);
+        let args =
+            build_ffmpeg_args("in.mp4", "out\\in_whatsapp_360p.mp4", p, None, AudioOpts::default());
         let expected: Vec<String> = [
             "-y", "-i", "in.mp4",
             "-map", "0:v:0", "-map", "0:a?",
@@ -707,17 +776,26 @@ mod tests {
     #[test]
     fn trim_adds_input_seek_and_duration() {
         let p = preset_by_name("480p").unwrap();
-        let args =
-            build_ffmpeg_args("in.mkv", "out.mp4", p, Some(&Trim { start: 5.5, end: 12.0 }), None);
+        let args = build_ffmpeg_args(
+            "in.mkv",
+            "out.mp4",
+            p,
+            Some(&Trim { start: 5.5, end: 12.0 }),
+            AudioOpts::default(),
+        );
         let i = args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(&args[i - 2..i + 2], &["-ss", "5.500", "-i", "in.mkv"]);
         assert_eq!(&args[i + 2..i + 4], &["-t", "6.500"]);
     }
 
+    fn audio(level: Option<&'static str>) -> AudioOpts<'static> {
+        AudioOpts { level, ..Default::default() }
+    }
+
     #[test]
     fn mute_drops_the_audio_track() {
         let p = preset_by_name("480p").unwrap();
-        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, Some("mute"));
+        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, audio(Some("mute")));
         assert!(args.contains(&"-an".to_string()));
         assert!(!args.contains(&"0:a?".to_string()));
         assert!(!args.contains(&"-c:a".to_string()));
@@ -726,14 +804,71 @@ mod tests {
     #[test]
     fn volume_reduction_adds_filter_and_keeps_aac() {
         let p = preset_by_name("480p").unwrap();
-        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, Some("50"));
+        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, audio(Some("50")));
         let i = args.iter().position(|a| a == "-af").unwrap();
         assert_eq!(args[i + 1], "volume=0.5");
         assert!(args.contains(&"-c:a".to_string()));
         // Unknown values keep audio untouched.
-        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, Some("banana"));
+        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, audio(Some("banana")));
         assert!(!args.iter().any(|a| a == "-af"));
         assert!(args.contains(&"0:a?".to_string()));
+    }
+
+    #[test]
+    fn track_selection_maps_the_chosen_stream() {
+        let p = preset_by_name("480p").unwrap();
+        let opts = AudioOpts { source: Some("1"), track_count: 3, ..Default::default() };
+        let args = build_ffmpeg_args("in.mkv", "out.mp4", p, None, opts);
+        assert!(args.contains(&"0:a:1".to_string()));
+        assert!(!args.contains(&"0:a?".to_string()));
+        // Non-numeric junk falls back to the default map.
+        let opts = AudioOpts { source: Some("x1"), track_count: 3, ..Default::default() };
+        let args = build_ffmpeg_args("in.mkv", "out.mp4", p, None, opts);
+        assert!(args.contains(&"0:a?".to_string()));
+    }
+
+    #[test]
+    fn merge_builds_amix_graph_with_inner_chain() {
+        let p = preset_by_name("480p").unwrap();
+        let opts = AudioOpts {
+            source: Some("merge"),
+            level: Some("50"),
+            normalize: true,
+            track_count: 2,
+        };
+        let args = build_ffmpeg_args("in.mkv", "out.mp4", p, None, opts);
+        let i = args.iter().position(|a| a == "-filter_complex").unwrap();
+        assert_eq!(
+            args[i + 1],
+            format!("[0:a:0][0:a:1]amix=inputs=2:duration=longest:normalize=0,{LOUDNORM},volume=0.5[aout]")
+        );
+        assert_eq!(&args[i + 2..i + 4], &["-map", "[aout]"]);
+        // Filters live inside the graph — no separate -af.
+        assert!(!args.iter().any(|a| a == "-af"));
+        // A single-track "merge" degrades to the default map.
+        let opts = AudioOpts { source: Some("merge"), track_count: 1, ..Default::default() };
+        let args = build_ffmpeg_args("in.mkv", "out.mp4", p, None, opts);
+        assert!(args.contains(&"0:a?".to_string()));
+        assert!(!args.iter().any(|a| a == "-filter_complex"));
+    }
+
+    #[test]
+    fn normalize_alone_uses_af_loudnorm() {
+        let p = preset_by_name("480p").unwrap();
+        let opts = AudioOpts { normalize: true, ..Default::default() };
+        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, opts);
+        let i = args.iter().position(|a| a == "-af").unwrap();
+        assert_eq!(args[i + 1], LOUDNORM);
+    }
+
+    #[test]
+    fn counts_audio_streams_from_header() {
+        let stderr = "Input #0, matroska\n  Duration: 00:10:00.00, start: 0.0\n    \
+Stream #0:0: Video: h264 (High)\n    Stream #0:1(und): Audio: aac, 48000 Hz\n    \
+Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
+        assert_eq!(parse_audio_tracks(stderr), 2);
+        assert_eq!(parse_audio_tracks("Stream #0:0: Video: h264"), 0);
+        assert_eq!(parse_audio_tracks(""), 0);
     }
 
     #[test]

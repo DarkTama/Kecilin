@@ -69,7 +69,7 @@ One click from "folder of videos" to "WhatsApp-ready copies": pick a folder, pic
 - ✅ **Hand off results** — drag the done row's thumbnail out of the app (tauri-plugin-drag; multi-part drags all parts), or "Copy" puts the file(s) on the clipboard via `clipboard-win` for Ctrl+V.
 - ✅ **Trim precision** — arrow keys nudge the focused handle (Shift = 1 s), Space toggles play/pause, and clicking/dragging the timeline seeks the playhead anywhere — playback can start mid-video, outside the selection.
 
-### Next up — audio round (planned; requested by friends, spec vetted)
+### Audio round (shipped in v0.5.0; requested by friends, spec vetted)
 
 - **Audio track selection** — for OBS-style multi-track recordings (game audio vs mic). Scan detects the audio track count (count `Audio:` streams in the same ffmpeg header we already parse for duration; add `audioTracks` to the scan result); files with >1 track get a per-file **Audio source** dropdown: *Default / Track N / Merge all*. Selection maps `-map 0:a:{index}` — only detected indices are offered (a missing index hard-fails, so no free-typed numbers); default stays `-map 0:a?`.
 - **Audio track merging** — the *Merge all* choice above. `-filter_complex "[0:a:0][0:a:1]amix=inputs=N:duration=longest:normalize=0[aout]" -map "[aout]"` — explicit input labels, mapped output, and `normalize=0` so amix doesn't quietly halve each source. Once `-filter_complex` is in play, volume/normalize chain *inside* it (not `-af`) — the arg builder owns that switch.
