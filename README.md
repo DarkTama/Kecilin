@@ -31,6 +31,8 @@ From [Releases](https://github.com/DarkTama/Kecilin/releases):
 - `Kecilin_*_x64-setup.exe` — installer
 - `Kecilin-*-portable-win64.zip` — portable (unzip and run `kecilin.exe`)
 
+On Linux, each release also carries a `.deb` and an AppImage (they use your system `ffmpeg` — install it from your package manager). Arch users can build from [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD) with `makepkg -si`.
+
 Or skip installing: **[kecilin on the web](https://darktama.github.io/Kecilin/)** runs entirely in your browser via ffmpeg.wasm — nothing is uploaded anywhere. It's much slower than the desktop app, so use it for small clips and quick jobs.
 
 Builds are unsigned, so Windows SmartScreen may warn on first run ("More info" → "Run anyway"). Requires the WebView2 runtime (preinstalled on Windows 11 / most Windows 10).

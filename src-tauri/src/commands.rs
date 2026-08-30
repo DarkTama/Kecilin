@@ -251,14 +251,30 @@ pub(crate) fn build_ffmpeg_args(
     a
 }
 
+/// Per-platform advice when ffmpeg can't run.
+const FFMPEG_HINT: &str = if cfg!(windows) {
+    "Run scripts/fetch-binaries.ps1 (dev) or reinstall Kecilin."
+} else {
+    "Install ffmpeg from your distribution (e.g. pacman -S ffmpeg)."
+};
+
 fn ffmpeg(app: &AppHandle) -> Result<tauri_plugin_shell::process::Command, String> {
-    // Resolved as <exe_dir>/ffmpeg.exe — the WHOLE argument is joined onto the
-    // exe dir, so it must be the bare name, not "binaries/ffmpeg" (that would
-    // look for <exe_dir>/binaries/ffmpeg.exe, which exists nowhere: tauri-build
-    // and the bundler both lay the sidecar flat next to the app exe).
-    app.shell()
-        .sidecar("ffmpeg")
-        .map_err(|e| format!("ffmpeg sidecar unavailable: {e} (run scripts/fetch-binaries.ps1)"))
+    #[cfg(windows)]
+    {
+        // Resolved as <exe_dir>/ffmpeg.exe — the WHOLE argument is joined onto
+        // the exe dir, so it must be the bare name, not "binaries/ffmpeg" (that
+        // would look for <exe_dir>/binaries/ffmpeg.exe, which exists nowhere:
+        // tauri-build and the bundler both lay the sidecar flat next to the exe).
+        app.shell()
+            .sidecar("ffmpeg")
+            .map_err(|e| format!("ffmpeg sidecar unavailable: {e}. {FFMPEG_HINT}"))
+    }
+    #[cfg(not(windows))]
+    {
+        // Linux/macOS: no bundled sidecar — the system ffmpeg is a package
+        // dependency (the AUR/deb way), always current and distro-blessed.
+        Ok(app.shell().command("ffmpeg"))
+    }
 }
 
 /// Sidecar self-check: run `ffmpeg -version`, return the banner line.
@@ -268,9 +284,7 @@ pub async fn check_ffmpeg(app: AppHandle) -> Result<String, String> {
         .args(["-version"])
         .output()
         .await
-        .map_err(|e| {
-            format!("ffmpeg failed to start: {e}. Run scripts/fetch-binaries.ps1 (dev) or reinstall Kecilin.")
-        })?;
+        .map_err(|e| format!("ffmpeg failed to start: {e}. {FFMPEG_HINT}"))?;
     if !out.status.success() {
         return Err(format!("ffmpeg self-check failed (exit {:?})", out.status.code()));
     }
@@ -892,19 +906,21 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
 
     #[test]
     fn output_path_default_override_and_parts() {
+        // Forward slashes: Path compares by components on Windows, and this
+        // test also runs on the Linux CI job.
         let p = preset_by_name("480p").unwrap();
-        let input = Path::new("D:\\vids\\clip.mkv");
+        let input = Path::new("vids/clip.mkv");
         assert_eq!(
             output_path(input, p, None, None).unwrap(),
-            Path::new("D:\\vids\\whatsapp_480p\\clip_whatsapp_480p.mp4")
+            Path::new("vids/whatsapp_480p/clip_whatsapp_480p.mp4")
         );
         assert_eq!(
-            output_path(input, p, Some("E:\\out"), None).unwrap(),
-            Path::new("E:\\out\\clip_whatsapp_480p.mp4")
+            output_path(input, p, Some("out"), None).unwrap(),
+            Path::new("out/clip_whatsapp_480p.mp4")
         );
         assert_eq!(
             output_path(input, p, None, Some(2)).unwrap(),
-            Path::new("D:\\vids\\whatsapp_480p\\clip_whatsapp_480p_part2.mp4")
+            Path::new("vids/whatsapp_480p/clip_whatsapp_480p_part2.mp4")
         );
     }
 

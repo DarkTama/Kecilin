@@ -1,0 +1,23 @@
+# Maintainer: DarkTama <claude@dak.co.id>
+# kecilin-bin: repackages the .deb built by CI for each GitHub Release.
+# After a new release: bump pkgver, run `updpkgsums`, then
+# `makepkg --printsrcinfo > .SRCINFO` before pushing to AUR.
+pkgname=kecilin-bin
+pkgver=0.7.0
+pkgrel=1
+pkgdesc="Batch-compress videos into WhatsApp-ready copies — a zero-knob GUI over ffmpeg"
+arch=('x86_64')
+url="https://github.com/DarkTama/Kecilin"
+license=('Apache-2.0')
+depends=('ffmpeg' 'webkit2gtk-4.1' 'gtk3')
+provides=('kecilin')
+conflicts=('kecilin')
+options=('!strip')
+source=("${url}/releases/download/v${pkgver}/kecilin_${pkgver}_amd64.deb")
+sha256sums=('SKIP') # run `updpkgsums` after each release
+
+package() {
+  # makepkg unpacks the .deb (an ar archive) into $srcdir; the payload
+  # lives in data.tar.gz.
+  bsdtar -xf "${srcdir}/data.tar.gz" -C "${pkgdir}"
+}

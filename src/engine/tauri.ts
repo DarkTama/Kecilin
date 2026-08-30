@@ -12,13 +12,17 @@ import type { BatchEvents, BatchItemSpec, Engine, Thumb } from "./types";
 
 const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "avi", "webm"];
 
+// Clipboard file copy (clipboard-win) and drag-out (tauri-plugin-drag) are
+// wired up on Windows only for now.
+const isWindows = navigator.userAgent.includes("Windows");
+
 export const tauriEngine: Engine = {
   caps: {
     folders: true,
     outputFolder: true,
     reveal: true,
-    clipboard: true,
-    dragOut: true,
+    clipboard: isWindows,
+    dragOut: isWindows,
     downloads: false,
   },
 

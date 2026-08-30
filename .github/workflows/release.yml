@@ -105,3 +105,64 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload ${{ steps.tag.outputs.tag }} "$env:PORTABLE_ZIP" --clobber
+
+  # Linux build (.deb + AppImage) — uses the system ffmpeg (a package
+  # dependency) instead of a bundled sidecar; feeds the AUR kecilin-bin
+  # recipe in packaging/aur/. `needs: release` so the GitHub Release exists
+  # before we upload to it.
+  linux:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          else
+            tag="v$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install deps (postinstall skips the Windows sidecar here)
+        run: npm ci
+
+      - name: Run tests
+        run: |
+          npm test
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build .deb + AppImage
+        run: npm run tauri build
+
+      - name: Upload Linux bundles to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" \
+            src-tauri/target/release/bundle/deb/*.deb \
+            src-tauri/target/release/bundle/appimage/*.AppImage --clobber

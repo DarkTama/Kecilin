@@ -95,7 +95,13 @@ Two versions from one repo and one tag: the desktop Release (unchanged) **and** 
 - Recursive folder scan; smarter overwrite policy (skip/ask instead of silent `-y`).
 - **In-app auto-update** — download-and-install via the Tauri updater instead of today's notify-and-open-releases.
 - **Bahasa Indonesia UI** — a language toggle; the app's audience (and name) is Indonesian.
-- macOS / Linux builds.
+- macOS builds.
+
+### Linux + AUR (v0.7.0, awaiting field test)
+
+- ✅ **Linux build** — CI attaches a `.deb` + AppImage to every release (new `linux` job). On Linux the app uses the **system ffmpeg** (package dependency — the distro way) instead of a bundled sidecar: `ffmpeg()` is cfg-gated, `tauri.linux.conf.json` drops `externalBin`. Clipboard file-copy and drag-out stay Windows-only for now (capability-gated by UA; the drag plugin and clipboard-win are cfg(windows) deps, with `capabilities/windows.json` platform-scoped for the drag permission).
+- ✅ **AUR recipe** — `packaging/aur/PKGBUILD` (`kecilin-bin`, repackages the release .deb; `provides=kecilin`). Testable locally with `makepkg -si` — no AUR account needed. Publishing needs an AUR account + SSH key (see packaging/aur/README.md); candidate maintainer: the Arch-using friend who requested it. Auto-publish via GitHub Action is a follow-up once the SSH deploy key exists.
+- ⏳ Untested on real hardware — the Linux build compiles and tests green in CI; runtime verification is on the friend's Arch machine.
 
 ### Non-goals
 

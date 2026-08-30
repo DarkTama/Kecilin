@@ -4,14 +4,17 @@ use commands::BatchState;
 use tauri::Manager;
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
-        .plugin(tauri_plugin_drag::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build());
+    // Drag-out is Windows-only for now (the UI hides it elsewhere).
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_drag::init());
+    builder
         .manage(BatchState::default())
         .invoke_handler(tauri::generate_handler![
             commands::check_ffmpeg,
