@@ -13,11 +13,13 @@ depends=('ffmpeg' 'webkit2gtk-4.1' 'gtk3')
 provides=('kecilin')
 conflicts=('kecilin')
 options=('!strip')
-source=("${url}/releases/download/v${pkgver}/kecilin_${pkgver}_amd64.deb")
+# Note: the release asset name is capitalized (Kecilin_..., from the Tauri
+# bundler) and GitHub asset URLs are case-sensitive.
+source=("${url}/releases/download/v${pkgver}/Kecilin_${pkgver}_amd64.deb")
 sha256sums=('SKIP') # run `updpkgsums` after each release
 
 package() {
   # makepkg unpacks the .deb (an ar archive) into $srcdir; the payload
-  # lives in data.tar.gz.
-  bsdtar -xf "${srcdir}/data.tar.gz" -C "${pkgdir}"
+  # lives in data.tar.gz (glob in case the compression changes).
+  bsdtar -xf "${srcdir}"/data.tar.* -C "${pkgdir}"
 }

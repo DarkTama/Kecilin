@@ -29,8 +29,9 @@ later with an AUR-publish GitHub Action once an SSH deploy key exists.)
 
 ## Notes
 
-- The `.deb` asset is named `kecilin_<version>_amd64.deb` by the Tauri
-  bundler; if a release names it differently, adjust `source=` to match.
+- The `.deb` asset is named `Kecilin_<version>_amd64.deb` (capital K, from
+  the Tauri bundler) — GitHub asset URLs are case-sensitive, so `source=`
+  matches that exactly (verified against the v0.7.0 release).
 - Clipboard file-copy and drag-out are Windows-only right now; the Linux
   build hides those buttons (everything else works, including previews and
   the trim editor).
