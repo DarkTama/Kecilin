@@ -3,7 +3,7 @@
 # After a new release: bump pkgver, run `updpkgsums`, then
 # `makepkg --printsrcinfo > .SRCINFO` before pushing to AUR.
 pkgname=kecilin-bin
-pkgver=0.7.0
+pkgver=0.8.1
 pkgrel=1
 pkgdesc="Batch-compress videos into WhatsApp-ready copies — a zero-knob GUI over ffmpeg"
 arch=('x86_64')
