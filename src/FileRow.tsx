@@ -1,13 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import { engine } from "./engine";
 import { fmtSize, fmtTime, parseTime } from "./format";
+import { useT } from "./i18n";
 import { useStore } from "./store";
 import type { AudioOpt, FileState, Trim } from "./store";
 
 // Thumbnails are extracted one at a time — each is an ffmpeg spawn.
 let thumbQueue: Promise<void> = Promise.resolve();
 
-export function FileRow({ file, converting }: { file: FileState; converting: boolean }) {
+export function FileRow({
+  file,
+  index,
+  converting,
+}: {
+  file: FileState;
+  index: number;
+  converting: boolean;
+}) {
+  const t = useT();
   const removeFile = useStore((st) => st.removeFile);
   const [editing, setEditing] = useState(false);
   const [thumb, setThumb] = useState<string | null>(null);
@@ -19,10 +29,10 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
     thumbQueue = thumbQueue.then(async () => {
       if (!live) return;
       try {
-        const t = await engine.prepareThumbnail(file.path, file.duration);
+        const th = await engine.prepareThumbnail(file.path, file.duration);
         if (live) {
-          setThumbRaw(t.iconPath);
-          setThumb(t.url);
+          setThumbRaw(th.iconPath);
+          setThumb(th.url);
         }
       } catch {
         // no thumbnail — the placeholder stays
@@ -41,49 +51,48 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
       : null;
 
   const badge = {
-    queued: converting ? <span className="text-xs text-slate-500">queued</span> : null,
+    queued: converting ? <span className="text-xs text-slate-500">{t("queued")}</span> : null,
     running: (
       <span className="text-xs tabular-nums text-emerald-400">{Math.round(file.percent)}%</span>
     ),
     done: (
-      <span
-        className="text-xs tabular-nums text-emerald-400"
-        title={`${fmtSize(file.size)} → ${fmtSize(outSum)}`}
-      >
+      <span className="text-xs tabular-nums text-emerald-400" title={`${fmtSize(file.size)} → ${fmtSize(outSum)}`}>
         ✓ {savedPct != null ? `−${savedPct}%` : fmtSize(outSum)}
       </span>
     ),
     failed: (
       <span className="text-xs text-red-400" title={file.error ?? undefined}>
-        ✗ failed
+        {t("failed")}
       </span>
     ),
-    canceled: <span className="text-xs text-amber-400">canceled</span>,
+    canceled: <span className="text-xs text-amber-400">{t("canceled")}</span>,
+    skipped: (
+      <span className="text-xs text-amber-400" title={file.error ?? undefined}>
+        {t("skipped")}
+      </span>
+    ),
   }[file.status];
 
   const trimBadge =
     file.trims.length === 1 ? (
       <span className="text-emerald-400">
-        {" "}
-        · ✂ {fmtTime(file.trims[0].start)}–{fmtTime(file.trims[0].end)}
+        {" "}· ✂ {fmtTime(file.trims[0].start)}–{fmtTime(file.trims[0].end)}
       </span>
     ) : file.trims.length > 1 ? (
-      <span className="text-emerald-400"> · ✂ {file.trims.length} parts</span>
+      <span className="text-emerald-400"> · ✂ {t("parts", { n: file.trims.length })}</span>
     ) : null;
 
   const audioNotes = [
     file.audioSource === "merge"
-      ? "merged audio"
+      ? t("mergedAudio")
       : typeof file.audioSource === "number"
-        ? `track ${file.audioSource + 1}`
+        ? t("track", { n: file.audioSource + 1 })
         : null,
-    file.normalize ? "normalized" : null,
-    file.audio === "mute" ? "muted" : file.audio !== "keep" ? `vol ${file.audio}%` : null,
+    file.normalize ? t("normalized") : null,
+    file.audio === "mute" ? t("muted") : file.audio !== "keep" ? t("vol", { n: file.audio }) : null,
   ].filter(Boolean);
   const audioBadge =
-    audioNotes.length > 0 ? (
-      <span className="text-amber-400"> · {audioNotes.join(" · ")}</span>
-    ) : null;
+    audioNotes.length > 0 ? <span className="text-amber-400"> · {audioNotes.join(" · ")}</span> : null;
 
   async function copyOutputs() {
     try {
@@ -101,19 +110,12 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
         <button
           onClick={() => setEditing(!editing)}
           disabled={converting}
-          title={
-            done && engine.caps.dragOut
-              ? "Preview / trim — drag me to share the converted file"
-              : "Preview / trim"
-          }
+          title={t("previewTrim") + (done && engine.caps.dragOut ? t("dragHint") : "")}
           draggable={done && engine.caps.dragOut && thumbRaw != null}
           onDragStart={(e) => {
             e.preventDefault();
             if (done && engine.caps.dragOut && thumbRaw) {
-              engine.dragOut(
-                file.outputs.map((o) => o.path),
-                thumbRaw,
-              );
+              engine.dragOut(file.outputs.map((o) => o.path), thumbRaw);
             }
           }}
           className="h-10 w-[71px] shrink-0 overflow-hidden rounded-md bg-slate-950 disabled:opacity-60"
@@ -136,24 +138,33 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
           </div>
         </div>
         {badge}
+        {file.status === "running" && (
+          <button
+            onClick={() => engine.skipFile(index)}
+            title={t("skipFile")}
+            className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs hover:bg-slate-800"
+          >
+            {t("skip")}
+          </button>
+        )}
         {done && !converting && (
           <>
             {engine.caps.reveal && (
               <button
                 onClick={() => engine.revealFile(file.outputs[0].path)}
-                title="Show the converted file in Explorer"
+                title={t("showTitle")}
                 className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs hover:bg-slate-800"
               >
-                Show
+                {t("show")}
               </button>
             )}
             {engine.caps.clipboard && (
               <button
                 onClick={copyOutputs}
-                title="Copy the converted file to the clipboard (Ctrl+V to paste)"
+                title={t("copyTitle")}
                 className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs hover:bg-slate-800"
               >
-                {copied ? "Copied ✓" : "Copy"}
+                {copied ? t("copied") : t("copy")}
               </button>
             )}
             {engine.caps.downloads &&
@@ -164,7 +175,7 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
                   download={o.name ?? `${file.name}.mp4`}
                   className="rounded-lg border border-emerald-700 px-2.5 py-1.5 text-xs text-emerald-300 hover:bg-slate-800"
                 >
-                  Save{file.outputs.length > 1 ? ` ${i + 1}` : ""}
+                  {t("save")}{file.outputs.length > 1 ? ` ${i + 1}` : ""}
                 </a>
               ))}
           </>
@@ -174,12 +185,12 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
           onClick={() => setEditing(!editing)}
           className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-800 disabled:opacity-40"
         >
-          {file.trims.length > 0 ? "Edit trim" : "Trim"}
+          {file.trims.length > 0 ? t("editTrim") : t("trim")}
         </button>
         <button
           disabled={converting}
           onClick={() => removeFile(file.path)}
-          title="Remove from queue"
+          title={t("removeFromQueue")}
           className="px-1 text-slate-600 hover:text-red-400 disabled:opacity-40"
         >
           ✕
@@ -187,10 +198,7 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
       </div>
       {file.status === "running" && (
         <div className="mx-4 -mt-1 mb-3 h-1 overflow-hidden rounded bg-slate-800">
-          <div
-            className="h-full bg-emerald-500 transition-all"
-            style={{ width: `${file.percent}%` }}
-          />
+          <div className="h-full bg-emerald-500 transition-all" style={{ width: `${file.percent}%` }} />
         </div>
       )}
       {editing && !converting && <TrimEditor file={file} onClose={() => setEditing(false)} />}
@@ -199,6 +207,7 @@ export function FileRow({ file, converting }: { file: FileState; converting: boo
 }
 
 function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void }) {
+  const t = useT();
   const setTrims = useStore((st) => st.setTrims);
   const setAudio = useStore((st) => st.setAudio);
   const setAudioSource = useStore((st) => st.setAudioSource);
@@ -226,8 +235,7 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
 
   const showVideo = preview === "native" || preview === "proxy";
   const customSecs = parseFloat(customLen);
-  const fixedLen =
-    lenMode === "30" ? 30 : lenMode === "custom" && customSecs >= 1 ? customSecs : null;
+  const fixedLen = lenMode === "30" ? 30 : lenMode === "custom" && customSecs >= 1 ? customSecs : null;
 
   async function fallbackToProxy() {
     if (triedProxy.current) {
@@ -270,15 +278,15 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
   }
 
   function commitText(which: "start" | "end", text: string) {
-    const t = parseTime(text);
-    if (t == null) {
+    const v = parseTime(text);
+    if (v == null) {
       setStartText(fmtTime(start));
       setEndText(fmtTime(end));
       return;
     }
     const max = duration ?? Number.POSITIVE_INFINITY;
-    if (which === "start") handleRange(Math.min(Math.max(0, t), end - 0.1), end, "start");
-    else handleRange(start, Math.min(Math.max(t, start + 0.1), max), "end");
+    if (which === "start") handleRange(Math.min(Math.max(0, v), end - 0.1), end, "start");
+    else handleRange(start, Math.min(Math.max(v, start + 0.1), max), "end");
   }
 
   const valid = end > start + 0.05;
@@ -320,8 +328,8 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.code !== "Space") return;
-      const t = e.target as HTMLElement | null;
-      if (t && ["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(t.tagName)) return;
+      const target = e.target as HTMLElement | null;
+      if (target && ["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(target.tagName)) return;
       e.preventDefault();
       togglePlay();
     }
@@ -359,27 +367,17 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           }}
         />
       )}
-      {preview === "preparing" && (
-        <p className="text-xs text-slate-400">
-          Preparing preview… (re-encoding a small proxy with the bundled ffmpeg — first time per
-          file)
-        </p>
-      )}
-      {preview === "none" && (
-        <p className="text-xs text-slate-400">
-          Preview couldn't be generated for this file — trim with the slider or typed times below;{" "}
-          <b>conversion is unaffected</b>.
-        </p>
-      )}
+      {preview === "preparing" && <p className="text-xs text-slate-400">{t("preparing")}</p>}
+      {preview === "none" && <p className="text-xs text-slate-400">{t("noPreview")}</p>}
 
       {duration != null && duration > 0 && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-          <span>Part length:</span>
+          <span>{t("partLength")}</span>
           {(
             [
-              ["free", "Free"],
-              ["30", "30 s (Status)"],
-              ["custom", "Custom"],
+              ["free", t("free")],
+              ["30", t("status30")],
+              ["custom", t("customLen")],
             ] as const
           ).map(([mode, label]) => (
             <button
@@ -409,9 +407,7 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
               s
             </label>
           )}
-          {fixedLen != null && (
-            <span className="text-slate-500">— slide the window, then “+ Add part”</span>
-          )}
+          {fixedLen != null && <span className="text-slate-500">{t("slideHint")}</span>}
         </div>
       )}
 
@@ -422,11 +418,11 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
               key={`${r.start}-${r.end}-${i}`}
               className="flex items-center gap-1.5 rounded-full border border-emerald-700 bg-emerald-500/10 px-2.5 py-1 tabular-nums text-emerald-300"
             >
-              part {i + 1}: {fmtTime(r.start)}–{fmtTime(r.end)}
+              {t("partChip", { n: i + 1 })}{fmtTime(r.start)}–{fmtTime(r.end)}
               <button
                 onClick={() => setRanges(ranges.filter((_, j) => j !== i))}
                 className="text-emerald-400 hover:text-white"
-                title="Remove this part"
+                title={t("removePart")}
               >
                 ×
               </button>
@@ -442,13 +438,14 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           end={end}
           playhead={showVideo ? playhead : null}
           onChange={handleRange}
-          onSeek={(t) => {
+          onSeek={(tt) => {
             const v = videoRef.current;
             if (v && showVideo) {
-              v.currentTime = t;
-              setPlayhead(t);
+              v.currentTime = tt;
+              setPlayhead(tt);
             }
           }}
+          labels={[t("trimStart"), t("trimEnd")]}
         />
       )}
 
@@ -456,17 +453,17 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
         {showVideo && (
           <button
             onClick={togglePlay}
-            title="Space also toggles play/pause; click the timeline to seek"
+            title={t("playTitle")}
             className="w-32 rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800"
           >
-            {playing ? "⏸ Pause" : "▶ Play range"}
+            {playing ? t("pause") : t("playRange")}
           </button>
         )}
         {showVideo && playhead != null && (
-          <span className="tabular-nums text-xs text-slate-400">at {fmtTime(playhead)}</span>
+          <span className="tabular-nums text-xs text-slate-400">{t("at", { t: fmtTime(playhead) })}</span>
         )}
         <label className="flex items-center gap-1.5 text-slate-300">
-          from
+          {t("from")}
           <input
             value={startText}
             onChange={(e) => setStartText(e.target.value)}
@@ -476,7 +473,7 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           />
         </label>
         <label className="flex items-center gap-1.5 text-slate-300">
-          to
+          {t("to")}
           <input
             value={endText}
             onChange={(e) => setEndText(e.target.value)}
@@ -487,66 +484,60 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
         </label>
         {file.audioTracks > 1 && (
           <label className="flex items-center gap-1.5 text-slate-300">
-            source
+            {t("source")}
             <select
               value={String(file.audioSource)}
               onChange={(e) => {
                 const v = e.target.value;
-                setAudioSource(
-                  file.path,
-                  v === "default" || v === "merge" ? v : Number(v),
-                );
+                setAudioSource(file.path, v === "default" || v === "merge" ? v : Number(v));
               }}
-              title="This recording has multiple audio tracks (e.g. game + mic)"
+              title={t("sourceTitle")}
               className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1"
             >
-              <option value="default">track 1 (default)</option>
+              <option value="default">{t("trackDefault")}</option>
               {Array.from({ length: file.audioTracks - 1 }, (_, i) => (
                 <option key={i + 1} value={i + 1}>
-                  track {i + 2}
+                  {t("trackN", { n: i + 2 })}
                 </option>
               ))}
-              <option value="merge">merge all</option>
+              <option value="merge">{t("mergeAll")}</option>
             </select>
           </label>
         )}
         <label className="flex items-center gap-1.5 text-slate-300">
-          audio
+          {t("audio")}
           <select
             value={file.audio}
             onChange={(e) => setAudio(file.path, e.target.value as AudioOpt)}
             className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1"
           >
-            <option value="keep">keep</option>
+            <option value="keep">{t("keep")}</option>
             <option value="75">75%</option>
             <option value="50">50%</option>
             <option value="25">25%</option>
-            <option value="mute">mute</option>
+            <option value="mute">{t("mute")}</option>
           </select>
         </label>
-        <label
-          className="flex items-center gap-1.5 text-slate-300"
-          title="Balance loudness (one-pass loudnorm) — evens out quiet mics and loud game audio"
-        >
+        <label className="flex items-center gap-1.5 text-slate-300" title={t("normalizeTitle")}>
           <input
             type="checkbox"
             checked={file.normalize}
             onChange={(e) => setNormalize(file.path, e.target.checked)}
             className="accent-emerald-500"
           />
-          normalize
+          {t("normalize")}
         </label>
         <span className="text-xs text-slate-500">
-          {valid ? `${fmtTime(end - start)} selected` : "end must be after start"}
+          {valid ? t("selected", { t: fmtTime(end - start) }) : t("endAfterStart")}
         </span>
         <div className="ml-auto flex gap-2">
           <button
             disabled={!valid}
             onClick={addPart}
-            title="Add the selected range as another exported part"
+            title={t("addPartTitle")}
             className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800 disabled:opacity-40"
           >
-            + Add part
+            {t("addPart")}
           </button>
           {(ranges.length > 0 || file.trims.length > 0) && (
             <button
@@ -556,23 +547,18 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
               }}
               className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800"
             >
-              Clear
+              {t("clear")}
             </button>
           )}
-          <button
-            onClick={onClose}
-            className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800"
-          >
-            Cancel
+          <button onClick={onClose} className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800">
+            {t("cancel")}
           </button>
           <button
             disabled={!valid && ranges.length === 0}
             onClick={apply}
             className="rounded-lg bg-emerald-600 px-3 py-1.5 font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
           >
-            {ranges.length > 0
-              ? `Apply ${ranges.length} part${ranges.length > 1 ? "s" : ""}`
-              : "Apply"}
+            {ranges.length > 0 ? t("applyParts", { n: ranges.length }) : t("apply")}
           </button>
         </div>
       </div>
@@ -589,6 +575,7 @@ function RangeSlider({
   playhead,
   onChange,
   onSeek,
+  labels,
 }: {
   duration: number;
   start: number;
@@ -596,6 +583,7 @@ function RangeSlider({
   playhead?: number | null;
   onChange: (start: number, end: number, moved: "start" | "end") => void;
   onSeek?: (t: number) => void;
+  labels: [string, string];
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const drag = useRef<"start" | "end" | "seek" | null>(null);
@@ -607,14 +595,11 @@ function RangeSlider({
     return Math.min(duration, Math.max(0, ((clientX - r.left) / r.width) * duration));
   }
 
-  const pct = (t: number) => (duration > 0 ? (t / duration) * 100 : 0);
+  const pct = (v: number) => (duration > 0 ? (v / duration) * 100 : 0);
 
   function nudge(which: "start" | "end", delta: number) {
-    if (which === "start") {
-      onChange(Math.min(Math.max(0, start + delta), end - MIN_GAP), end, "start");
-    } else {
-      onChange(start, Math.max(Math.min(duration, end + delta), start + MIN_GAP), "end");
-    }
+    if (which === "start") onChange(Math.min(Math.max(0, start + delta), end - MIN_GAP), end, "start");
+    else onChange(start, Math.max(Math.min(duration, end + delta), start + MIN_GAP), "end");
   }
 
   return (
@@ -629,10 +614,10 @@ function RangeSlider({
       }}
       onPointerMove={(ev) => {
         if (!drag.current) return;
-        const t = timeAt(ev.clientX);
-        if (drag.current === "seek") onSeek?.(t);
-        else if (drag.current === "start") onChange(Math.min(t, end - MIN_GAP), end, "start");
-        else onChange(start, Math.max(t, start + MIN_GAP), "end");
+        const v = timeAt(ev.clientX);
+        if (drag.current === "seek") onSeek?.(v);
+        else if (drag.current === "start") onChange(Math.min(v, end - MIN_GAP), end, "start");
+        else onChange(start, Math.max(v, start + MIN_GAP), "end");
       }}
       onPointerUp={() => (drag.current = null)}
     >
@@ -647,12 +632,12 @@ function RangeSlider({
           style={{ left: `${pct(Math.min(duration, Math.max(0, playhead)))}%` }}
         />
       )}
-      {(["start", "end"] as const).map((which) => (
+      {(["start", "end"] as const).map((which, i) => (
         <div
           key={which}
           tabIndex={0}
           role="slider"
-          aria-label={which === "start" ? "Trim start" : "Trim end"}
+          aria-label={labels[i]}
           aria-valuenow={which === "start" ? start : end}
           onPointerDown={(ev) => {
             ev.stopPropagation();

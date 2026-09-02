@@ -10,7 +10,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build());
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
     // Drag-out is Windows-only for now (the UI hides it elsewhere).
     #[cfg(windows)]
     let builder = builder.plugin(tauri_plugin_drag::init());
@@ -18,10 +20,12 @@ pub fn run() {
         .manage(BatchState::default())
         .invoke_handler(tauri::generate_handler![
             commands::check_ffmpeg,
+            commands::list_encoders,
             commands::scan_directory,
             commands::scan_files,
             commands::start_batch,
             commands::cancel_batch,
+            commands::skip_file,
             commands::open_output_folder,
             commands::prepare_preview,
             commands::prepare_thumbnail,

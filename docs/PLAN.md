@@ -85,17 +85,23 @@ Two versions from one repo and one tag: the desktop Release (unchanged) **and** 
 - Trim/multi-part/fixed-length/audio round/size guidance all work on web; proxy previews and folder scanning are desktop-only (thumbnails still work everywhere — wasm decodes even HEVC for the frame grab).
 - ✅ **Deploy** — `.github/workflows/pages.yml` builds `vite --mode web` + copies the wasm runtime and deploys on every release tag.
 
+### The rest of the backlog (shipped in v0.8.0)
+
+Everything that was left in "Later", in one release — except macOS builds.
+
+- ✅ **Skip current file** — a Skip button on each running row (works per file even when converting in parallel); skipped files count separately from failures.
+- ✅ **ETA on the batch bar** — from elapsed time and overall progress, shown once the batch is >3% in.
+- ✅ **Overwrite policy** — Advanced → "If the output already exists": overwrite (the script's `-y`, default) / skip / keep both (`_2`, `_3`, …).
+- ✅ **Recursive folder scan — opt-in, off by default** — "Include subfolders" next to the folder picker; hidden folders and our own `whatsapp_*` output folders are never descended into, so a rescan can't re-queue converted files.
+- ✅ **In-app auto-update** — Tauri updater: the release workflow signs the installer (minisign key in CI secrets) and publishes `latest.json`; the app offers download-and-install + relaunch. Windows only for now (the Linux job doesn't produce a signed manifest; AUR/AppImage users update through their package manager or Releases).
+- ✅ **Bahasa Indonesia UI** — EN/ID toggle in the footer, persisted; every string lives in `src/i18n.ts`.
+- ✅ **Parallel conversion** — Advanced → parallel conversions 1…cores (default 1, the script's behavior); a tokio semaphore bounds concurrent ffmpeg children.
+- ✅ **Custom presets + extra flags** — Advanced: user presets (name/height/CRF/max kbps/level, bufsize = 2×) appear as extra cards and get their own `whatsapp_{slug}` folders; an "extra ffmpeg arguments" field is appended right before the output path so it overrides ours.
+- ✅ **GPU encoders** — Advanced → video encoder: CPU x264 (default, best quality) or NVIDIA NVENC / AMD AMF / Intel QSV, offered only when the bundled ffmpeg build has them; same maxrate/bufsize ceiling, x264 tuning swapped for the vendor's quality mode. Honest label: faster, slightly larger or lower quality.
+
 ### Later
 
-- Parallel conversion (Tokio pool up to core count — mostly pays off for many short clips).
-- **Skip current file** during a batch (in addition to Cancel-all) — one stuck/wrong file shouldn't cost the whole run.
-- **ETA on the batch bar** — estimate remaining time from encode speed so far.
-- Custom preset editor / advanced flags.
-- Optional GPU encode (NVENC) for speed at some quality cost.
-- Recursive folder scan; smarter overwrite policy (skip/ask instead of silent `-y`).
-- **In-app auto-update** — download-and-install via the Tauri updater instead of today's notify-and-open-releases.
-- **Bahasa Indonesia UI** — a language toggle; the app's audience (and name) is Indonesian.
-- macOS builds.
+- macOS builds (needs a Mac to sign/notarize/test).
 
 ### Linux + AUR (v0.7.0, awaiting field test)
 

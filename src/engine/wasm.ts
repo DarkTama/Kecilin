@@ -1,9 +1,9 @@
 // Web engine: ffmpeg.wasm, fully client-side. Files never leave the browser.
 // Slower than the desktop app (wasm; "veryfast" preset compensates a little).
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import type { OutputFile, Preset, VideoFile } from "../store";
+import type { OutputFile, VideoFile } from "../store";
 import { buildFfmpegArgs, outputName } from "./args";
-import type { BatchEvents, BatchItemSpec, Engine, Thumb } from "./types";
+import type { BatchEvents, BatchItemSpec, BatchOptions, Engine, Thumb } from "./types";
 
 const RELEASES_PAGE = "https://github.com/DarkTama/Kecilin/releases";
 const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "avi", "webm"];
@@ -15,6 +15,8 @@ let ffmpeg: FFmpeg | null = null;
 let events: BatchEvents | null = null;
 let running = false;
 let cancelled = false;
+let currentIndex: number | null = null;
+let skipRequested = false;
 
 const base = import.meta.env.BASE_URL;
 
@@ -53,7 +55,7 @@ async function withMount<T>(f: FFmpeg, file: File, run: (input: string) => Promi
       await f.unmount(MOUNT);
       await f.deleteDir(MOUNT);
     } catch {
-      // instance may have been terminated by cancel
+      // instance may have been terminated by cancel/skip
     }
   }
 }
@@ -105,7 +107,7 @@ async function addFiles(list: File[]): Promise<VideoFile[]> {
 
 async function convertOne(
   item: BatchItemSpec,
-  preset: Preset,
+  opts: BatchOptions,
   index: number,
   ev: BatchEvents,
 ): Promise<OutputFile[]> {
@@ -119,13 +121,13 @@ async function convertOne(
     for (let segIdx = 0; segIdx < segCount; segIdx++) {
       const trim = item.trims[segIdx] ?? null;
       const part = item.trims.length > 1 ? segIdx + 1 : null;
-      const outName = outputName(file.name, preset, part);
+      const outName = outputName(file.name, opts.preset.name, part);
       const denomUs =
         (trim ? Math.max(0, trim.end - trim.start) : (item.duration ?? 0)) * 1_000_000;
       const args = buildFfmpegArgs(
         input,
         `/${outName}`,
-        preset,
+        opts.preset,
         trim,
         {
           source: item.audioSource === "default" ? null : String(item.audioSource),
@@ -134,6 +136,8 @@ async function convertOne(
           trackCount: item.audioTracks,
         },
         "veryfast", // wasm is slow enough already
+        null, // no GPU encoders in the browser
+        opts.extraArgs,
       );
       const onProgress = (e: { progress: number; time: number }) => {
         const segPct =
@@ -160,26 +164,35 @@ async function convertOne(
   return outputs;
 }
 
-async function runBatch(items: BatchItemSpec[], preset: Preset, ev: BatchEvents): Promise<void> {
+async function runBatch(items: BatchItemSpec[], opts: BatchOptions, ev: BatchEvents): Promise<void> {
   let converted = 0;
   let failed = 0;
+  let skipped = 0;
   for (let index = 0; index < items.length; index++) {
     if (cancelled) break;
+    currentIndex = index;
+    skipRequested = false;
     ev.fileStart(index);
     try {
-      const outputs = await convertOne(items[index], preset, index, ev);
+      const outputs = await convertOne(items[index], opts, index, ev);
       converted++;
-      ev.fileDone(index, true, null, outputs);
+      ev.fileDone(index, true, false, null, outputs);
     } catch (e) {
       if (cancelled) break;
+      if (skipRequested) {
+        skipped++;
+        ev.fileDone(index, false, true, "skipped", []);
+        continue;
+      }
       failed++;
-      ev.fileDone(index, false, e instanceof Error ? e.message : String(e), []);
+      ev.fileDone(index, false, false, e instanceof Error ? e.message : String(e), []);
     }
   }
   const canceled = cancelled;
   cancelled = false;
   running = false;
-  ev.batchDone({ converted, failed, canceled });
+  currentIndex = null;
+  ev.batchDone({ converted, failed, skipped, canceled });
 }
 
 export const wasmEngine: Engine = {
@@ -190,6 +203,7 @@ export const wasmEngine: Engine = {
     clipboard: false,
     dragOut: false,
     downloads: true,
+    advancedEncode: false,
   },
 
   async check() {
@@ -199,8 +213,10 @@ export const wasmEngine: Engine = {
   version: async () => __APP_VERSION__,
   checkForUpdates: () => {}, // the site is always the latest version
   openReleases: () => void window.open(RELEASES_PAGE, "_blank"),
+  listEncoders: async () => [],
 
   pickFolder: async () => null,
+  scanFolder: async () => [],
 
   pickFiles() {
     return new Promise((resolve) => {
@@ -238,18 +254,30 @@ export const wasmEngine: Engine = {
     };
   },
 
-  async startBatch(items, preset) {
+  async startBatch(items, options) {
     if (running) throw new Error("a batch is already running");
     if (!events) throw new Error("no event sink");
     running = true;
     cancelled = false;
-    void runBatch(items, preset, events);
+    void runBatch(items, options, events);
   },
 
   cancelBatch() {
     if (!running) return;
     cancelled = true;
     // terminate kills the worker; the next load() starts a fresh instance.
+    try {
+      ffmpeg?.terminate();
+    } catch {
+      // already gone
+    }
+    ffmpeg = null;
+  },
+
+  skipFile(index) {
+    // One instance, one file at a time: skipping means killing the current run.
+    if (!running || index !== currentIndex) return;
+    skipRequested = true;
     try {
       ffmpeg?.terminate();
     } catch {

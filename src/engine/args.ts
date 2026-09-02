@@ -1,16 +1,7 @@
 // TS port of src-tauri/src/commands.rs build_ffmpeg_args — used only by the
 // web (ffmpeg.wasm) engine. Keep byte-for-byte in sync with the Rust builder;
 // args.test.ts mirrors the Rust unit tests to hold the line.
-import type { Preset, Trim } from "../store";
-
-export const PRESET_TABLE: Record<
-  Preset,
-  { height: number; crf: number; maxrate: string; bufsize: string; level: string }
-> = {
-  "360p": { height: 360, crf: 24, maxrate: "1200k", bufsize: "2400k", level: "3.1" },
-  "480p": { height: 480, crf: 22, maxrate: "2200k", bufsize: "4400k", level: "3.1" },
-  "720p": { height: 720, crf: 20, maxrate: "4200k", bufsize: "8400k", level: "4.1" },
-};
+import type { PresetSpec, Trim } from "../store";
 
 export const LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11";
 
@@ -21,16 +12,64 @@ export type AudioArgOpts = {
   trackCount: number;
 };
 
+/** Filesystem-safe preset name (mirrors Rust `slug`). */
+export function slug(name: string): string {
+  const s = name.replace(/[^A-Za-z0-9_-]/g, "_").replace(/^_+|_+$/g, "");
+  return s || "custom";
+}
+
+function kbps(rate: string): number {
+  return Number.parseInt(rate, 10) || 2000;
+}
+
+function videoArgs(p: PresetSpec, encoder: string | null, speed: "slow" | "veryfast"): string[] {
+  const crf = String(p.crf);
+  switch (encoder) {
+    case "nvenc":
+      return [
+        "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr",
+        "-cq", crf, "-b:v", "0", "-maxrate", p.maxrate, "-bufsize", p.bufsize,
+        "-profile:v", "high", "-level", p.level, "-pix_fmt", "yuv420p",
+        "-g", "120", "-bf", "3",
+      ];
+    case "amf":
+      return [
+        "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality",
+        "-rc", "vbr_peak", "-b:v", `${Math.floor((kbps(p.maxrate) * 6) / 10)}k`,
+        "-maxrate", p.maxrate, "-bufsize", p.bufsize,
+        "-profile:v", "high", "-level", p.level, "-pix_fmt", "yuv420p",
+        "-g", "120", "-bf", "3",
+      ];
+    case "qsv":
+      return [
+        "-c:v", "h264_qsv", "-preset", "slower", "-global_quality", crf, "-look_ahead", "1",
+        "-maxrate", p.maxrate, "-bufsize", p.bufsize,
+        "-profile:v", "high", "-level", p.level, "-pix_fmt", "nv12",
+        "-g", "120", "-bf", "3",
+      ];
+    default:
+      return [
+        "-c:v", "libx264", "-preset", speed, "-profile:v", "high",
+        "-level", p.level, "-pix_fmt", "yuv420p",
+        "-crf", crf, "-maxrate", p.maxrate, "-bufsize", p.bufsize,
+        "-g", "120", "-keyint_min", "60", "-sc_threshold", "40",
+        "-bf", "3", "-refs", "4", "-rc-lookahead", "40",
+        "-x264-params", "aq-mode=3:aq-strength=0.8",
+      ];
+  }
+}
+
 export function buildFfmpegArgs(
   input: string,
   output: string,
-  presetId: Preset,
+  p: PresetSpec,
   trim: Trim | null,
   audio: AudioArgOpts,
   /** "slow" matches the script/desktop; the web build uses "veryfast". */
   speed: "slow" | "veryfast" = "slow",
+  encoder: string | null = null,
+  extra: string[] = [],
 ): string[] {
-  const p = PRESET_TABLE[presetId];
   const a: string[] = ["-y"];
   if (trim) a.push("-ss", trim.start.toFixed(3));
   a.push("-i", input);
@@ -62,28 +101,21 @@ export function buildFfmpegArgs(
       a.push("-map", "0:a?");
     }
   }
-  a.push(
-    "-vf", `scale=-2:${p.height}:flags=lanczos`,
-    "-c:v", "libx264", "-preset", speed, "-profile:v", "high",
-    "-level", p.level, "-pix_fmt", "yuv420p",
-    "-crf", String(p.crf), "-maxrate", p.maxrate, "-bufsize", p.bufsize,
-    "-g", "120", "-keyint_min", "60", "-sc_threshold", "40",
-    "-bf", "3", "-refs", "4", "-rc-lookahead", "40",
-    "-x264-params", "aq-mode=3:aq-strength=0.8",
-  );
+  a.push("-vf", `scale=-2:${p.height}:flags=lanczos`);
+  a.push(...videoArgs(p, encoder, speed));
   if (mute) {
     a.push("-an");
   } else {
     if (!merge && af.length) a.push("-af", af.join(","));
     a.push("-c:a", "aac", "-q:a", "2", "-ar", "48000", "-ac", "2");
   }
-  a.push("-movflags", "+faststart", "-progress", "pipe:1", "-nostats", output);
+  a.push("-movflags", "+faststart", "-progress", "pipe:1", "-nostats", ...extra, output);
   return a;
 }
 
 /** `{stem}_whatsapp_{preset}[_partN].mp4` — same naming as the desktop app. */
-export function outputName(inputName: string, preset: Preset, part: number | null): string {
+export function outputName(inputName: string, presetName: string, part: number | null): string {
   const stem = inputName.replace(/\.[^.]+$/, "");
   const suffix = part != null ? `_part${part}` : "";
-  return `${stem}_whatsapp_${preset}${suffix}.mp4`;
+  return `${stem}_whatsapp_${slug(presetName)}${suffix}.mp4`;
 }

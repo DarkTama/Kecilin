@@ -1,7 +1,8 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -12,42 +13,86 @@ use tauri_plugin_shell::ShellExt;
 /// Video extensions the scanner accepts (same list as compress.bat).
 const VIDEO_EXTS: [&str; 5] = ["mp4", "mov", "mkv", "avi", "webm"];
 
-/// The three fixed presets, verbatim from compress.bat.
-pub struct Preset {
-    pub name: &'static str,
+/// A preset: one of the three built-ins (verbatim from compress.bat) or a
+/// user-defined one from the Advanced panel.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetSpec {
+    pub name: String,
     pub height: u32,
     pub crf: u32,
-    pub maxrate: &'static str,
-    pub bufsize: &'static str,
-    pub level: &'static str,
+    pub maxrate: String,
+    pub bufsize: String,
+    pub level: String,
 }
 
-const PRESETS: [Preset; 3] = [
-    Preset { name: "360p", height: 360, crf: 24, maxrate: "1200k", bufsize: "2400k", level: "3.1" },
-    Preset { name: "480p", height: 480, crf: 22, maxrate: "2200k", bufsize: "4400k", level: "3.1" },
-    Preset { name: "720p", height: 720, crf: 20, maxrate: "4200k", bufsize: "8400k", level: "4.1" },
-];
+impl PresetSpec {
+    fn new(name: &str, height: u32, crf: u32, maxrate: &str, bufsize: &str, level: &str) -> Self {
+        Self {
+            name: name.into(),
+            height,
+            crf,
+            maxrate: maxrate.into(),
+            bufsize: bufsize.into(),
+            level: level.into(),
+        }
+    }
+}
 
-fn preset_by_name(name: &str) -> Option<&'static Preset> {
-    PRESETS.iter().find(|p| p.name == name)
+pub(crate) fn builtin_preset(name: &str) -> Option<PresetSpec> {
+    match name {
+        "360p" => Some(PresetSpec::new("360p", 360, 24, "1200k", "2400k", "3.1")),
+        "480p" => Some(PresetSpec::new("480p", 480, 22, "2200k", "4400k", "3.1")),
+        "720p" => Some(PresetSpec::new("720p", 720, 20, "4200k", "8400k", "4.1")),
+        _ => None,
+    }
+}
+
+/// Filesystem-safe preset name for `whatsapp_{preset}` folders and suffixes.
+pub(crate) fn slug(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let trimmed = s.trim_matches('_');
+    if trimmed.is_empty() { "custom".into() } else { trimmed.to_string() }
 }
 
 #[derive(Default)]
 pub struct BatchState {
     running: AtomicBool,
     cancel: AtomicBool,
-    child: Mutex<Option<CommandChild>>,
+    /// Live ffmpeg children by queue index (several when converting in parallel).
+    children: Mutex<HashMap<usize, CommandChild>>,
+    /// Indices the user asked to skip; consumed when the killed child reports back.
+    skipped: Mutex<HashSet<usize>>,
 }
 
 impl BatchState {
-    /// Cancel the batch: raise the flag and kill the ffmpeg child, if any.
-    pub fn abort(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
-        if let Ok(mut guard) = self.child.lock() {
-            if let Some(child) = guard.take() {
+    fn kill(&self, index: usize) {
+        if let Ok(mut map) = self.children.lock() {
+            if let Some(child) = map.remove(&index) {
                 let _ = child.kill();
             }
         }
+    }
+
+    /// Cancel the whole batch: raise the flag and kill every running child.
+    pub fn abort(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Ok(mut map) = self.children.lock() {
+            for (_, child) in map.drain() {
+                let _ = child.kill();
+            }
+        }
+    }
+
+    /// Skip one file: kill its child; the batch moves on.
+    pub fn skip_file(&self, index: usize) {
+        if let Ok(mut set) = self.skipped.lock() {
+            set.insert(index);
+        }
+        self.kill(index);
     }
 }
 
@@ -91,6 +136,26 @@ pub struct BatchItem {
     pub audio_tracks: usize,
 }
 
+/// Batch-wide options from the UI (presets + the Advanced panel).
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchOptions {
+    pub preset: PresetSpec,
+    pub out_dir: Option<String>,
+    /// Concurrent conversions; 0/1 = sequential (the script's behavior).
+    #[serde(default)]
+    pub parallel: usize,
+    /// "overwrite" (script's -y, default) | "skip" | "rename" (keep both).
+    #[serde(default)]
+    pub overwrite: String,
+    /// None = libx264 (the script); "nvenc" | "amf" | "qsv" = GPU encoders.
+    #[serde(default)]
+    pub encoder: Option<String>,
+    /// Extra ffmpeg arguments appended right before the output path.
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
 #[derive(Serialize, Clone)]
 pub struct OutputFile {
     path: String,
@@ -112,6 +177,7 @@ struct FileProgress {
 struct FileDone {
     index: usize,
     ok: bool,
+    skipped: bool,
     error: Option<String>,
     outputs: Vec<OutputFile>,
 }
@@ -120,6 +186,7 @@ struct FileDone {
 struct BatchDone {
     converted: u32,
     failed: u32,
+    skipped: u32,
     canceled: bool,
 }
 
@@ -156,6 +223,11 @@ fn push_strs(args: &mut Vec<String>, xs: &[&str]) {
     args.extend(xs.iter().map(|s| s.to_string()));
 }
 
+/// "2200k" → 2200.
+fn kbps(rate: &str) -> Option<u32> {
+    rate.trim_end_matches(['k', 'K']).parse().ok()
+}
+
 /// Per-file audio choices, resolved from the queue item.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct AudioOpts<'a> {
@@ -171,16 +243,60 @@ pub(crate) struct AudioOpts<'a> {
 
 const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
 
+/// The video encoder block. None = libx264 exactly as compress.bat; the GPU
+/// encoders keep the same rate ceiling (maxrate/bufsize) and GOP, trading the
+/// x264 tuning for speed.
+fn video_args(p: &PresetSpec, encoder: Option<&str>) -> Vec<String> {
+    let crf = p.crf.to_string();
+    let mut a = Vec::new();
+    match encoder {
+        Some("nvenc") => push_strs(&mut a, &[
+            "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr",
+            "-cq", &crf, "-b:v", "0", "-maxrate", &p.maxrate, "-bufsize", &p.bufsize,
+            "-profile:v", "high", "-level", &p.level, "-pix_fmt", "yuv420p",
+            "-g", "120", "-bf", "3",
+        ]),
+        Some("amf") => {
+            // AMF has no CRF-style mode worth trusting; aim ~60% of the ceiling.
+            let target = format!("{}k", kbps(&p.maxrate).unwrap_or(2000) * 6 / 10);
+            push_strs(&mut a, &[
+                "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality",
+                "-rc", "vbr_peak", "-b:v", &target, "-maxrate", &p.maxrate, "-bufsize", &p.bufsize,
+                "-profile:v", "high", "-level", &p.level, "-pix_fmt", "yuv420p",
+                "-g", "120", "-bf", "3",
+            ])
+        }
+        Some("qsv") => push_strs(&mut a, &[
+            "-c:v", "h264_qsv", "-preset", "slower", "-global_quality", &crf, "-look_ahead", "1",
+            "-maxrate", &p.maxrate, "-bufsize", &p.bufsize,
+            "-profile:v", "high", "-level", &p.level, "-pix_fmt", "nv12",
+            "-g", "120", "-bf", "3",
+        ]),
+        _ => push_strs(&mut a, &[
+            "-c:v", "libx264", "-preset", "slow", "-profile:v", "high",
+            "-level", &p.level, "-pix_fmt", "yuv420p",
+            "-crf", &crf, "-maxrate", &p.maxrate, "-bufsize", &p.bufsize,
+            "-g", "120", "-keyint_min", "60", "-sc_threshold", "40",
+            "-bf", "3", "-refs", "4", "-rc-lookahead", "40",
+            "-x264-params", "aq-mode=3:aq-strength=0.8",
+        ]),
+    }
+    a
+}
+
 /// Build the exact ffmpeg invocation from compress.bat (see docs/ARCHITECTURE.md).
 /// Trim adds `-ss` before `-i` (fast input seek) and `-t` after it; the
 /// `-progress pipe:1 -nostats` pair only affects reporting, not the encode.
 /// Audio: chain order is amix → loudnorm → volume; mute wins over everything.
+/// `extra` lands right before the output path so user flags override ours.
 pub(crate) fn build_ffmpeg_args(
     input: &str,
     output: &str,
-    p: &Preset,
+    p: &PresetSpec,
     trim: Option<&Trim>,
     audio: AudioOpts,
+    encoder: Option<&str>,
+    extra: &[String],
 ) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into()];
     if let Some(t) = trim {
@@ -191,7 +307,6 @@ pub(crate) fn build_ffmpeg_args(
         push_strs(&mut a, &["-t", &format!("{:.3}", (t.end - t.start).max(0.0))]);
     }
     let vf = format!("scale=-2:{}:flags=lanczos", p.height);
-    let crf = p.crf.to_string();
     let mute = audio.level == Some("mute");
     let merge = audio.source == Some("merge") && audio.track_count >= 2;
 
@@ -226,15 +341,8 @@ pub(crate) fn build_ffmpeg_args(
             push_strs(&mut a, &["-map", "0:a?"]);
         }
     }
-    push_strs(&mut a, &[
-        "-vf", &vf,
-        "-c:v", "libx264", "-preset", "slow", "-profile:v", "high",
-        "-level", p.level, "-pix_fmt", "yuv420p",
-        "-crf", &crf, "-maxrate", p.maxrate, "-bufsize", p.bufsize,
-        "-g", "120", "-keyint_min", "60", "-sc_threshold", "40",
-        "-bf", "3", "-refs", "4", "-rc-lookahead", "40",
-        "-x264-params", "aq-mode=3:aq-strength=0.8",
-    ]);
+    push_strs(&mut a, &["-vf", &vf]);
+    a.extend(video_args(p, encoder));
     if mute {
         push_strs(&mut a, &["-an"]);
     } else {
@@ -243,11 +351,9 @@ pub(crate) fn build_ffmpeg_args(
         }
         push_strs(&mut a, &["-c:a", "aac", "-q:a", "2", "-ar", "48000", "-ac", "2"]);
     }
-    push_strs(&mut a, &[
-        "-movflags", "+faststart",
-        "-progress", "pipe:1", "-nostats",
-        output,
-    ]);
+    push_strs(&mut a, &["-movflags", "+faststart", "-progress", "pipe:1", "-nostats"]);
+    a.extend(extra.iter().cloned());
+    a.push(output.to_string());
     a
 }
 
@@ -292,6 +398,24 @@ pub async fn check_ffmpeg(app: AppHandle) -> Result<String, String> {
     Ok(stdout.lines().next().unwrap_or("ffmpeg").to_string())
 }
 
+/// Which GPU H.264 encoders this ffmpeg build ships ("nvenc"/"amf"/"qsv").
+/// Presence in the build ≠ working hardware; a failed encode reports itself.
+#[tauri::command]
+pub async fn list_encoders(app: AppHandle) -> Result<Vec<String>, String> {
+    let out = ffmpeg(&app)?
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let names: HashSet<&str> = text.lines().filter_map(|l| l.split_whitespace().nth(1)).collect();
+    Ok([("nvenc", "h264_nvenc"), ("amf", "h264_amf"), ("qsv", "h264_qsv")]
+        .iter()
+        .filter(|(_, enc)| names.contains(enc))
+        .map(|(id, _)| id.to_string())
+        .collect())
+}
+
 fn is_video(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
@@ -322,25 +446,42 @@ async fn probe_files(
     Ok(files)
 }
 
-/// List videos at the top level of `path` (non-recursive, same as the script).
-#[tauri::command]
-pub async fn scan_directory(app: AppHandle, path: String) -> Result<Vec<VideoFile>, String> {
-    let mut found: Vec<(PathBuf, String, u64)> = Vec::new();
-    for entry in fs::read_dir(&path).map_err(|e| format!("cannot read folder: {e}"))? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+/// Collect videos under `dir`. Recursive mode skips hidden folders and our own
+/// `whatsapp_*` output folders (so a rescan never re-queues converted files).
+fn walk(dir: &Path, recursive: bool, found: &mut Vec<(PathBuf, String, u64)>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
         let p = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if p.is_dir() {
+            if recursive && !name.starts_with('.') && !name.starts_with("whatsapp_") {
+                walk(&p, true, found);
+            }
+            continue;
+        }
         // Non-UTF-8 paths can't cross the IPC/argument boundary; skip them.
         if !p.is_file() || !is_video(&p) || p.to_str().is_none() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         found.push((p, name, size));
     }
-    found.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+}
+
+/// List videos in `path` — top level only (the script's behavior) unless
+/// `recursive`.
+#[tauri::command]
+pub async fn scan_directory(
+    app: AppHandle,
+    path: String,
+    recursive: bool,
+) -> Result<Vec<VideoFile>, String> {
+    fs::read_dir(&path).map_err(|e| format!("cannot read folder: {e}"))?;
+    let mut found: Vec<(PathBuf, String, u64)> = Vec::new();
+    walk(Path::new(&path), recursive, &mut found);
+    found.sort_by(|a, b| {
+        a.0.to_string_lossy().to_lowercase().cmp(&b.0.to_string_lossy().to_lowercase())
+    });
     probe_files(&app, found).await
 }
 
@@ -364,17 +505,15 @@ pub async fn scan_files(app: AppHandle, paths: Vec<String>) -> Result<Vec<VideoF
     probe_files(&app, found).await
 }
 
-/// Kick off a sequential batch conversion. Returns immediately; progress and
-/// completion arrive as `file:*` / `batch:done` events.
+/// Kick off a batch conversion. Returns immediately; progress and completion
+/// arrive as `file:*` / `batch:done` events.
 #[tauri::command]
 pub fn start_batch(
     app: AppHandle,
     state: State<'_, BatchState>,
     items: Vec<BatchItem>,
-    preset: String,
-    out_dir: Option<String>,
+    options: BatchOptions,
 ) -> Result<(), String> {
-    let p = preset_by_name(&preset).ok_or_else(|| format!("unknown preset: {preset}"))?;
     if items.is_empty() {
         return Err("nothing to convert".into());
     }
@@ -382,14 +521,23 @@ pub fn start_batch(
         return Err("a batch is already running".into());
     }
     state.cancel.store(false, Ordering::SeqCst);
+    if let Ok(mut set) = state.skipped.lock() {
+        set.clear();
+    }
     let app2 = app.clone();
-    tauri::async_runtime::spawn(async move { run_batch(app2, items, p, out_dir).await });
+    tauri::async_runtime::spawn(async move { run_batch(app2, items, options).await });
     Ok(())
 }
 
 #[tauri::command]
 pub fn cancel_batch(state: State<'_, BatchState>) {
     state.abort();
+}
+
+/// Skip one queued/running file; the rest of the batch continues.
+#[tauri::command]
+pub fn skip_file(state: State<'_, BatchState>, index: usize) {
+    state.skip_file(index);
 }
 
 fn stable_hash(s: &str) -> u64 {
@@ -513,52 +661,108 @@ pub fn open_output_folder(
     preset: String,
     out_dir: Option<String>,
 ) -> Result<(), String> {
-    let p = preset_by_name(&preset).ok_or_else(|| format!("unknown preset: {preset}"))?;
     let dir = match out_dir {
         Some(d) => PathBuf::from(d),
         None => Path::new(&anchor)
             .parent()
             .ok_or("no parent folder")?
-            .join(format!("whatsapp_{}", p.name)),
+            .join(format!("whatsapp_{}", slug(&preset))),
     };
     tauri_plugin_opener::open_path(dir, None::<&str>).map_err(|e| e.to_string())
 }
 
-async fn run_batch(
-    app: AppHandle,
-    items: Vec<BatchItem>,
-    preset: &'static Preset,
-    out_dir: Option<String>,
-) {
-    let mut converted = 0u32;
-    let mut failed = 0u32;
-    for (index, item) in items.iter().enumerate() {
+/// Where a converted file lands: inside the custom output dir if set, else in
+/// `whatsapp_{preset}` next to the input (the script's layout). `part` appends
+/// `_partN` for multi-part splits.
+pub(crate) fn output_path(
+    input: &Path,
+    preset: &PresetSpec,
+    out_dir: Option<&str>,
+    part: Option<usize>,
+) -> Option<PathBuf> {
+    let stem = input.file_stem()?.to_string_lossy();
+    let tag = slug(&preset.name);
+    let dir = match out_dir {
+        Some(d) => PathBuf::from(d),
+        None => input.parent()?.join(format!("whatsapp_{tag}")),
+    };
+    let suffix = part.map(|n| format!("_part{n}")).unwrap_or_default();
+    Some(dir.join(format!("{stem}_whatsapp_{tag}{suffix}.mp4")))
+}
+
+/// `clip.mp4` → `clip_2.mp4`, `clip_3.mp4`, … first one that doesn't exist.
+pub(crate) fn unique_path(path: &Path) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    (2..)
+        .map(|n| dir.join(format!("{stem}_{n}.{ext}")))
+        .find(|p| !p.exists())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+enum ConvErr {
+    Failed(String),
+    Skipped(String),
+}
+
+async fn run_batch(app: AppHandle, items: Vec<BatchItem>, opts: BatchOptions) {
+    let parallel = opts.parallel.max(1);
+    let sem = Arc::new(tokio::sync::Semaphore::new(parallel));
+    let opts = Arc::new(opts);
+    let mut handles = Vec::with_capacity(items.len());
+    for (index, item) in items.into_iter().enumerate() {
+        // Wait for a slot before spawning, so at most `parallel` run at once.
+        let Ok(permit) = sem.clone().acquire_owned().await else { break };
         if app.state::<BatchState>().cancel.load(Ordering::SeqCst) {
             break;
         }
-        let _ = app.emit("file:start", FileStart { index });
-        match convert_one(&app, item, preset, out_dir.as_deref(), index).await {
-            Ok(outputs) => {
-                converted += 1;
-                let _ = app.emit("file:done", FileDone { index, ok: true, error: None, outputs });
-            }
-            Err(e) => {
-                // A cancel kills the child mid-file; that's not a real failure.
-                if app.state::<BatchState>().cancel.load(Ordering::SeqCst) {
-                    break;
+        let app2 = app.clone();
+        let opts2 = opts.clone();
+        handles.push(tauri::async_runtime::spawn(async move {
+            let _permit = permit;
+            let _ = app2.emit("file:start", FileStart { index });
+            match convert_one(&app2, &item, &opts2, index).await {
+                Ok(outputs) => {
+                    let _ = app2.emit(
+                        "file:done",
+                        FileDone { index, ok: true, skipped: false, error: None, outputs },
+                    );
+                    (1u32, 0u32, 0u32)
                 }
-                failed += 1;
-                let _ = app.emit(
-                    "file:done",
-                    FileDone { index, ok: false, error: Some(e), outputs: vec![] },
-                );
+                Err(ConvErr::Skipped(reason)) => {
+                    let _ = app2.emit(
+                        "file:done",
+                        FileDone { index, ok: false, skipped: true, error: Some(reason), outputs: vec![] },
+                    );
+                    (0, 0, 1)
+                }
+                Err(ConvErr::Failed(e)) => {
+                    // A cancel kills the child mid-file; that's not a real failure.
+                    if app2.state::<BatchState>().cancel.load(Ordering::SeqCst) {
+                        return (0, 0, 0);
+                    }
+                    let _ = app2.emit(
+                        "file:done",
+                        FileDone { index, ok: false, skipped: false, error: Some(e), outputs: vec![] },
+                    );
+                    (0, 1, 0)
+                }
             }
+        }));
+    }
+    let (mut converted, mut failed, mut skipped) = (0u32, 0u32, 0u32);
+    for h in handles {
+        if let Ok((c, f, s)) = h.await {
+            converted += c;
+            failed += f;
+            skipped += s;
         }
     }
     let state = app.state::<BatchState>();
     let canceled = state.cancel.swap(false, Ordering::SeqCst);
     state.running.store(false, Ordering::SeqCst);
-    let _ = app.emit("batch:done", BatchDone { converted, failed, canceled });
+    let _ = app.emit("batch:done", BatchDone { converted, failed, skipped, canceled });
 
     // Batches run for minutes and people tab away — toast when unfocused.
     let focused = app
@@ -581,44 +785,25 @@ async fn run_batch(
     }
 }
 
-/// Where a converted file lands: inside the custom output dir if set, else in
-/// `whatsapp_{preset}` next to the input (the script's layout). `part` appends
-/// `_partN` for multi-part splits.
-pub(crate) fn output_path(
-    input: &Path,
-    preset: &Preset,
-    out_dir: Option<&str>,
-    part: Option<usize>,
-) -> Option<PathBuf> {
-    let stem = input.file_stem()?.to_string_lossy();
-    let dir = match out_dir {
-        Some(d) => PathBuf::from(d),
-        None => input.parent()?.join(format!("whatsapp_{}", preset.name)),
-    };
-    let suffix = part.map(|n| format!("_part{n}")).unwrap_or_default();
-    Some(dir.join(format!("{}_whatsapp_{}{}.mp4", stem, preset.name, suffix)))
-}
-
 /// Convert one queue item: a single encode for the whole file or one trim
 /// range, or several sequential encodes for a multi-part split. Returns the
 /// produced output files (path + size) for the result stats.
 async fn convert_one(
     app: &AppHandle,
     item: &BatchItem,
-    preset: &Preset,
-    out_dir: Option<&str>,
+    opts: &BatchOptions,
     index: usize,
-) -> Result<Vec<OutputFile>, String> {
+) -> Result<Vec<OutputFile>, ConvErr> {
     let seg_count = item.trims.len().max(1);
     let mut outputs = Vec::with_capacity(seg_count);
     for seg_idx in 0..seg_count {
         let trim = item.trims.get(seg_idx);
         let part = if item.trims.len() > 1 { Some(seg_idx + 1) } else { None };
-        let out = convert_segment(app, item, preset, out_dir, index, trim, part, seg_idx, seg_count)
+        let out = convert_segment(app, item, opts, index, trim, part, seg_idx, seg_count)
             .await
-            .map_err(|e| match part {
-                Some(n) => format!("part {n}: {e}"),
-                None => e,
+            .map_err(|e| match (e, part) {
+                (ConvErr::Failed(msg), Some(n)) => ConvErr::Failed(format!("part {n}: {msg}")),
+                (other, _) => other,
             })?;
         outputs.push(out);
     }
@@ -629,20 +814,30 @@ async fn convert_one(
 async fn convert_segment(
     app: &AppHandle,
     item: &BatchItem,
-    preset: &Preset,
-    out_dir: Option<&str>,
+    opts: &BatchOptions,
     index: usize,
     trim: Option<&Trim>,
     part: Option<usize>,
     seg_idx: usize,
     seg_count: usize,
-) -> Result<OutputFile, String> {
+) -> Result<OutputFile, ConvErr> {
+    let fail = |m: String| ConvErr::Failed(m);
     let input = Path::new(&item.path);
-    let out_path =
-        output_path(input, preset, out_dir, part).ok_or("file has no name or parent")?;
-    let dir = out_path.parent().ok_or("output has no parent folder")?;
-    fs::create_dir_all(dir).map_err(|e| format!("cannot create output folder: {e}"))?;
-    let out_str = out_path.to_str().ok_or("output path is not valid UTF-8")?.to_string();
+    let mut out_path = output_path(input, &opts.preset, opts.out_dir.as_deref(), part)
+        .ok_or_else(|| fail("file has no name or parent".into()))?;
+    if out_path.exists() {
+        match opts.overwrite.as_str() {
+            "skip" => return Err(ConvErr::Skipped("output already exists".into())),
+            "rename" => out_path = unique_path(&out_path),
+            _ => {} // overwrite — the script's -y
+        }
+    }
+    let dir = out_path.parent().ok_or_else(|| fail("output has no parent folder".into()))?;
+    fs::create_dir_all(dir).map_err(|e| fail(format!("cannot create output folder: {e}")))?;
+    let out_str = out_path
+        .to_str()
+        .ok_or_else(|| fail("output path is not valid UTF-8".into()))?
+        .to_string();
 
     // Progress denominator: the trimmed range if set, else the scanned duration.
     let denom_us: Option<f64> = trim
@@ -657,11 +852,25 @@ async fn convert_segment(
         normalize: item.normalize,
         track_count: item.audio_tracks,
     };
-    let args = build_ffmpeg_args(&item.path, &out_str, preset, trim, audio);
-    let (mut rx, child) = ffmpeg(app)?.args(args).spawn().map_err(|e| e.to_string())?;
+    let args = build_ffmpeg_args(
+        &item.path,
+        &out_str,
+        &opts.preset,
+        trim,
+        audio,
+        opts.encoder.as_deref(),
+        &opts.extra_args,
+    );
+    let (mut rx, child) = ffmpeg(app)
+        .map_err(fail)?
+        .args(args)
+        .spawn()
+        .map_err(|e| fail(e.to_string()))?;
 
     let state = app.state::<BatchState>();
-    *state.child.lock().map_err(|e| e.to_string())? = Some(child);
+    if let Ok(mut map) = state.children.lock() {
+        map.insert(index, child);
+    }
 
     let mut stderr_tail = String::new();
     let mut code: Option<i32> = None;
@@ -699,18 +908,33 @@ async fn convert_segment(
             _ => {}
         }
     }
-    if let Ok(mut guard) = state.child.lock() {
-        guard.take();
+    if let Ok(mut map) = state.children.lock() {
+        map.remove(&index);
     }
+    let user_skipped = state.skipped.lock().map(|mut s| s.remove(&index)).unwrap_or(false);
 
-    if code == Some(0) && out_path.exists() {
+    if code == Some(0) && out_path.exists() && !user_skipped {
         let size = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
         Ok(OutputFile { path: out_str, size })
     } else {
         // Don't leave a corrupt partial file that looks converted.
         let _ = fs::remove_file(&out_path);
-        Err(last_error_line(&stderr_tail, code))
+        if user_skipped {
+            Err(ConvErr::Skipped("skipped".into()))
+        } else {
+            Err(ConvErr::Failed(last_error_line(&stderr_tail, code)))
+        }
     }
+}
+
+fn last_error_line(stderr: &str, code: Option<i32>) -> String {
+    stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| format!("ffmpeg exited with code {code:?}"))
 }
 
 /// Reveal a converted file in the system file manager.
@@ -738,34 +962,33 @@ pub fn copy_file_to_clipboard(paths: Vec<String>) -> Result<(), String> {
     }
 }
 
-fn last_error_line(stderr: &str, code: Option<i32>) -> String {
-    stderr
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .unwrap_or_else(|| format!("ffmpeg exited with code {code:?}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn audio(level: Option<&'static str>) -> AudioOpts<'static> {
+        AudioOpts { level, ..Default::default() }
+    }
+
+    fn args(input: &str, output: &str, preset: &str, trim: Option<&Trim>, a: AudioOpts) -> Vec<String> {
+        build_ffmpeg_args(input, output, &builtin_preset(preset).unwrap(), trim, a, None, &[])
+    }
+
     #[test]
     fn presets_match_compress_bat() {
-        let p = preset_by_name("480p").unwrap();
-        assert_eq!((p.height, p.crf, p.maxrate, p.bufsize, p.level), (480, 22, "2200k", "4400k", "3.1"));
-        let p = preset_by_name("720p").unwrap();
-        assert_eq!((p.height, p.crf, p.level), (720, 20, "4.1"));
-        assert!(preset_by_name("1080p").is_none());
+        let p = builtin_preset("480p").unwrap();
+        assert_eq!(
+            (p.height, p.crf, p.maxrate.as_str(), p.bufsize.as_str(), p.level.as_str()),
+            (480, 22, "2200k", "4400k", "3.1")
+        );
+        let p = builtin_preset("720p").unwrap();
+        assert_eq!((p.height, p.crf, p.level.as_str()), (720, 20, "4.1"));
+        assert!(builtin_preset("1080p").is_none());
     }
 
     #[test]
     fn args_match_the_script_exactly() {
-        let p = preset_by_name("360p").unwrap();
-        let args =
-            build_ffmpeg_args("in.mp4", "out\\in_whatsapp_360p.mp4", p, None, AudioOpts::default());
+        let args = args("in.mp4", "out\\in_whatsapp_360p.mp4", "360p", None, AudioOpts::default());
         let expected: Vec<String> = [
             "-y", "-i", "in.mp4",
             "-map", "0:v:0", "-map", "0:a?",
@@ -789,100 +1012,131 @@ mod tests {
 
     #[test]
     fn trim_adds_input_seek_and_duration() {
-        let p = preset_by_name("480p").unwrap();
-        let args = build_ffmpeg_args(
-            "in.mkv",
-            "out.mp4",
-            p,
-            Some(&Trim { start: 5.5, end: 12.0 }),
-            AudioOpts::default(),
-        );
-        let i = args.iter().position(|a| a == "-i").unwrap();
-        assert_eq!(&args[i - 2..i + 2], &["-ss", "5.500", "-i", "in.mkv"]);
-        assert_eq!(&args[i + 2..i + 4], &["-t", "6.500"]);
-    }
-
-    fn audio(level: Option<&'static str>) -> AudioOpts<'static> {
-        AudioOpts { level, ..Default::default() }
+        let a = args("in.mkv", "out.mp4", "480p", Some(&Trim { start: 5.5, end: 12.0 }), AudioOpts::default());
+        let i = a.iter().position(|x| x == "-i").unwrap();
+        assert_eq!(&a[i - 2..i + 2], &["-ss", "5.500", "-i", "in.mkv"]);
+        assert_eq!(&a[i + 2..i + 4], &["-t", "6.500"]);
     }
 
     #[test]
     fn mute_drops_the_audio_track() {
-        let p = preset_by_name("480p").unwrap();
-        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, audio(Some("mute")));
-        assert!(args.contains(&"-an".to_string()));
-        assert!(!args.contains(&"0:a?".to_string()));
-        assert!(!args.contains(&"-c:a".to_string()));
+        let a = args("in.mp4", "out.mp4", "480p", None, audio(Some("mute")));
+        assert!(a.contains(&"-an".to_string()));
+        assert!(!a.contains(&"0:a?".to_string()));
+        assert!(!a.contains(&"-c:a".to_string()));
     }
 
     #[test]
     fn volume_reduction_adds_filter_and_keeps_aac() {
-        let p = preset_by_name("480p").unwrap();
-        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, audio(Some("50")));
-        let i = args.iter().position(|a| a == "-af").unwrap();
-        assert_eq!(args[i + 1], "volume=0.5");
-        assert!(args.contains(&"-c:a".to_string()));
-        // Unknown values keep audio untouched.
-        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, audio(Some("banana")));
-        assert!(!args.iter().any(|a| a == "-af"));
-        assert!(args.contains(&"0:a?".to_string()));
+        let a = args("in.mp4", "out.mp4", "480p", None, audio(Some("50")));
+        let i = a.iter().position(|x| x == "-af").unwrap();
+        assert_eq!(a[i + 1], "volume=0.5");
+        assert!(a.contains(&"-c:a".to_string()));
+        let a = args("in.mp4", "out.mp4", "480p", None, audio(Some("banana")));
+        assert!(!a.iter().any(|x| x == "-af"));
+        assert!(a.contains(&"0:a?".to_string()));
     }
 
     #[test]
     fn track_selection_maps_the_chosen_stream() {
-        let p = preset_by_name("480p").unwrap();
         let opts = AudioOpts { source: Some("1"), track_count: 3, ..Default::default() };
-        let args = build_ffmpeg_args("in.mkv", "out.mp4", p, None, opts);
-        assert!(args.contains(&"0:a:1".to_string()));
-        assert!(!args.contains(&"0:a?".to_string()));
-        // Non-numeric junk falls back to the default map.
+        let a = args("in.mkv", "out.mp4", "480p", None, opts);
+        assert!(a.contains(&"0:a:1".to_string()));
+        assert!(!a.contains(&"0:a?".to_string()));
         let opts = AudioOpts { source: Some("x1"), track_count: 3, ..Default::default() };
-        let args = build_ffmpeg_args("in.mkv", "out.mp4", p, None, opts);
-        assert!(args.contains(&"0:a?".to_string()));
+        let a = args("in.mkv", "out.mp4", "480p", None, opts);
+        assert!(a.contains(&"0:a?".to_string()));
     }
 
     #[test]
     fn merge_builds_amix_graph_with_inner_chain() {
-        let p = preset_by_name("480p").unwrap();
-        let opts = AudioOpts {
-            source: Some("merge"),
-            level: Some("50"),
-            normalize: true,
-            track_count: 2,
-        };
-        let args = build_ffmpeg_args("in.mkv", "out.mp4", p, None, opts);
-        let i = args.iter().position(|a| a == "-filter_complex").unwrap();
+        let opts = AudioOpts { source: Some("merge"), level: Some("50"), normalize: true, track_count: 2 };
+        let a = args("in.mkv", "out.mp4", "480p", None, opts);
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
         assert_eq!(
-            args[i + 1],
+            a[i + 1],
             format!("[0:a:0][0:a:1]amix=inputs=2:duration=longest:normalize=0,{LOUDNORM},volume=0.5[aout]")
         );
-        assert_eq!(&args[i + 2..i + 4], &["-map", "[aout]"]);
-        // Filters live inside the graph — no separate -af.
-        assert!(!args.iter().any(|a| a == "-af"));
-        // A single-track "merge" degrades to the default map.
+        assert_eq!(&a[i + 2..i + 4], &["-map", "[aout]"]);
+        assert!(!a.iter().any(|x| x == "-af"));
         let opts = AudioOpts { source: Some("merge"), track_count: 1, ..Default::default() };
-        let args = build_ffmpeg_args("in.mkv", "out.mp4", p, None, opts);
-        assert!(args.contains(&"0:a?".to_string()));
-        assert!(!args.iter().any(|a| a == "-filter_complex"));
+        let a = args("in.mkv", "out.mp4", "480p", None, opts);
+        assert!(a.contains(&"0:a?".to_string()));
+        assert!(!a.iter().any(|x| x == "-filter_complex"));
     }
 
     #[test]
     fn normalize_alone_uses_af_loudnorm() {
-        let p = preset_by_name("480p").unwrap();
         let opts = AudioOpts { normalize: true, ..Default::default() };
-        let args = build_ffmpeg_args("in.mp4", "out.mp4", p, None, opts);
-        let i = args.iter().position(|a| a == "-af").unwrap();
-        assert_eq!(args[i + 1], LOUDNORM);
+        let a = args("in.mp4", "out.mp4", "480p", None, opts);
+        let i = a.iter().position(|x| x == "-af").unwrap();
+        assert_eq!(a[i + 1], LOUDNORM);
     }
 
     #[test]
-    fn counts_audio_streams_from_header() {
-        let stderr = "Input #0, matroska\n  Duration: 00:10:00.00, start: 0.0\n    \
-Stream #0:0: Video: h264 (High)\n    Stream #0:1(und): Audio: aac, 48000 Hz\n    \
-Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
-        assert_eq!(parse_audio_tracks(stderr), 2);
-        assert_eq!(parse_audio_tracks("Stream #0:0: Video: h264"), 0);
-        assert_eq!(parse_audio_tracks(""), 0);
+    fn gpu_encoders_swap_the_video_block_and_keep_the_ceiling() {
+        let p = builtin_preset("720p").unwrap();
+        for (enc, codec) in [("nvenc", "h264_nvenc"), ("amf", "h264_amf"), ("qsv", "h264_qsv")] {
+            let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some(enc), &[]);
+            assert!(a.contains(&codec.to_string()), "{enc}");
+            assert!(!a.contains(&"libx264".to_string()), "{enc}");
+            assert!(!a.iter().any(|x| x == "-x264-params"), "{enc}");
+            let i = a.iter().position(|x| x == "-maxrate").unwrap();
+            assert_eq!(a[i + 1], "4200k", "{enc}");
+            assert!(a.contains(&"-c:a".to_string()), "{enc}: audio block intact");
+        }
+        // Unknown encoder ids fall back to x264.
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some("vhs"), &[]);
+        assert!(a.contains(&"libx264".to_string()));
+    }
+
+    #[test]
+    fn extra_args_land_right_before_the_output() {
+        let p = builtin_preset("480p").unwrap();
+        let extra = vec!["-metadata".to_string(), "title=x".to_string()];
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &extra);
+        let n = a.len();
+        assert_eq!(&a[n - 3..], &["-metadata", "title=x", "out.mp4"]);
+        assert_eq!(a[n - 4], "-nostats");
+    }
+
+    #[test]
+    fn custom_preset_names_are_slugged() {
+        assert_eq!(slug("My Phone (HD)!"), "My_Phone__HD");
+        assert_eq!(slug("480p"), "480p");
+        assert_eq!(slug("***"), "custom");
+        let p = PresetSpec::new("Story 1080", 1080, 20, "6000k", "12000k", "4.2");
+        let out = output_path(Path::new("vids/clip.mkv"), &p, None, None).unwrap();
+        assert_eq!(out, Path::new("vids/whatsapp_Story_1080/clip_whatsapp_Story_1080.mp4"));
+    }
+
+    #[test]
+    fn output_path_default_override_and_parts() {
+        let p = builtin_preset("480p").unwrap();
+        let input = Path::new("vids/clip.mkv");
+        assert_eq!(
+            output_path(input, &p, None, None).unwrap(),
+            Path::new("vids/whatsapp_480p/clip_whatsapp_480p.mp4")
+        );
+        assert_eq!(
+            output_path(input, &p, Some("out"), None).unwrap(),
+            Path::new("out/clip_whatsapp_480p.mp4")
+        );
+        assert_eq!(
+            output_path(input, &p, None, Some(2)).unwrap(),
+            Path::new("vids/whatsapp_480p/clip_whatsapp_480p_part2.mp4")
+        );
+    }
+
+    #[test]
+    fn unique_path_appends_a_counter() {
+        let dir = std::env::temp_dir().join(format!("kecilin-unique-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("clip.mp4");
+        fs::write(&base, b"x").unwrap();
+        fs::write(dir.join("clip_2.mp4"), b"x").unwrap();
+        assert_eq!(unique_path(&base), dir.join("clip_3.mp4"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -897,7 +1151,6 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
     #[test]
     fn parses_progress_lines() {
         assert_eq!(parse_progress_us("out_time_us=1500000"), Some(1_500_000));
-        // out_time_ms is microseconds too (ffmpeg quirk).
         assert_eq!(parse_progress_us("out_time_ms=1500000"), Some(1_500_000));
         assert_eq!(parse_progress_us("out_time_us=-9223372036854775808"), Some(0));
         assert_eq!(parse_progress_us("out_time_ms=N/A"), None);
@@ -905,23 +1158,34 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
     }
 
     #[test]
-    fn output_path_default_override_and_parts() {
-        // Forward slashes: Path compares by components on Windows, and this
-        // test also runs on the Linux CI job.
-        let p = preset_by_name("480p").unwrap();
-        let input = Path::new("vids/clip.mkv");
-        assert_eq!(
-            output_path(input, p, None, None).unwrap(),
-            Path::new("vids/whatsapp_480p/clip_whatsapp_480p.mp4")
-        );
-        assert_eq!(
-            output_path(input, p, Some("out"), None).unwrap(),
-            Path::new("out/clip_whatsapp_480p.mp4")
-        );
-        assert_eq!(
-            output_path(input, p, None, Some(2)).unwrap(),
-            Path::new("vids/whatsapp_480p/clip_whatsapp_480p_part2.mp4")
-        );
+    fn counts_audio_streams_from_header() {
+        let stderr = "Input #0, matroska\n  Duration: 00:10:00.00, start: 0.0\n    \
+Stream #0:0: Video: h264 (High)\n    Stream #0:1(und): Audio: aac, 48000 Hz\n    \
+Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
+        assert_eq!(parse_audio_tracks(stderr), 2);
+        assert_eq!(parse_audio_tracks("Stream #0:0: Video: h264"), 0);
+        assert_eq!(parse_audio_tracks(""), 0);
+    }
+
+    #[test]
+    fn walk_skips_output_folders_when_recursive() {
+        let dir = std::env::temp_dir().join(format!("kecilin-walk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::create_dir_all(dir.join("whatsapp_480p")).unwrap();
+        fs::write(dir.join("a.mp4"), b"x").unwrap();
+        fs::write(dir.join("sub/b.mkv"), b"x").unwrap();
+        fs::write(dir.join("whatsapp_480p/a_whatsapp_480p.mp4"), b"x").unwrap();
+        fs::write(dir.join("notes.txt"), b"x").unwrap();
+        let mut flat = Vec::new();
+        walk(&dir, false, &mut flat);
+        assert_eq!(flat.len(), 1);
+        let mut deep = Vec::new();
+        walk(&dir, true, &mut deep);
+        let names: Vec<_> = deep.iter().map(|f| f.1.clone()).collect();
+        assert_eq!(deep.len(), 2, "{names:?}");
+        assert!(names.contains(&"b.mkv".to_string()));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

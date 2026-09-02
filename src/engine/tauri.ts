@@ -7,8 +7,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { checkForUpdates, RELEASES_PAGE } from "../updateCheck";
-import type { OutputFile, Preset, Summary, VideoFile } from "../store";
-import type { BatchEvents, BatchItemSpec, Engine, Thumb } from "./types";
+import type { OutputFile, Summary, VideoFile } from "../store";
+import type { BatchEvents, BatchItemSpec, BatchOptions, Engine, Thumb } from "./types";
 
 const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "avi", "webm"];
 
@@ -24,19 +24,24 @@ export const tauriEngine: Engine = {
     clipboard: isWindows,
     dragOut: isWindows,
     downloads: false,
+    advancedEncode: true,
   },
 
   check: () => invoke<string>("check_ffmpeg"),
   version: () => getVersion(),
   checkForUpdates: () => void checkForUpdates(),
   openReleases: () => void openUrl(RELEASES_PAGE),
+  listEncoders: () => invoke<string[]>("list_encoders").catch(() => []),
 
-  async pickFolder() {
+  async pickFolder(recursive) {
     const dir = await open({ directory: true, title: "Choose a folder with videos" });
     if (typeof dir !== "string") return null;
-    const files = await invoke<VideoFile[]>("scan_directory", { path: dir });
+    const files = await invoke<VideoFile[]>("scan_directory", { path: dir, recursive });
     return { folder: dir, files };
   },
+
+  scanFolder: (folder, recursive) =>
+    invoke<VideoFile[]>("scan_directory", { path: folder, recursive }),
 
   async pickFiles() {
     const sel = await open({
@@ -67,16 +72,21 @@ export const tauriEngine: Engine = {
       listen<{ index: number; percent: number }>("file:progress", (e) =>
         ev.fileProgress(e.payload.index, e.payload.percent),
       ),
-      listen<{ index: number; ok: boolean; error: string | null; outputs: OutputFile[] }>(
-        "file:done",
-        (e) => ev.fileDone(e.payload.index, e.payload.ok, e.payload.error, e.payload.outputs),
+      listen<{
+        index: number;
+        ok: boolean;
+        skipped: boolean;
+        error: string | null;
+        outputs: OutputFile[];
+      }>("file:done", (e) =>
+        ev.fileDone(e.payload.index, e.payload.ok, e.payload.skipped, e.payload.error, e.payload.outputs),
       ),
       listen<Summary>("batch:done", (e) => ev.batchDone(e.payload)),
     ];
     return () => subs.forEach((p) => p.then((un) => un()));
   },
 
-  startBatch(items: BatchItemSpec[], preset: Preset, outDir: string | null) {
+  startBatch(items: BatchItemSpec[], options: BatchOptions) {
     return invoke("start_batch", {
       items: items.map((f) => ({
         path: f.path,
@@ -87,12 +97,19 @@ export const tauriEngine: Engine = {
         normalize: f.normalize,
         audioTracks: f.audioTracks,
       })),
-      preset,
-      outDir,
+      options: {
+        preset: options.preset,
+        outDir: options.outDir,
+        parallel: options.parallel,
+        overwrite: options.overwrite,
+        encoder: options.encoder,
+        extraArgs: options.extraArgs,
+      },
     });
   },
 
   cancelBatch: () => void invoke("cancel_batch"),
+  skipFile: (index) => void invoke("skip_file", { index }),
 
   async pickOutDir() {
     const dir = await open({ directory: true, title: "Choose output folder" });
