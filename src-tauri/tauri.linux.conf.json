@@ -1,6 +1,10 @@
 {
   "bundle": {
-    "targets": ["deb", "appimage"],
-    "externalBin": []
+    "targets": [
+      "deb",
+      "appimage"
+    ],
+    "externalBin": [],
+    "createUpdaterArtifacts": false
   }
 }
