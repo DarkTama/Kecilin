@@ -207,9 +207,65 @@ describe("buildFfmpegArgs", () => {
 
     expect(args).toContain("-filter_complex");
     const fc = args[args.indexOf("-filter_complex") + 1];
-    expect(fc).toContain("[acat]loudnorm[aout]");
+    expect(fc).toContain(`[acat]${LOUDNORM}[aout]`);
     expect(args).toContain("[aout]");
     expect(args).toContain("-c:a");
+  });
+  it("includes post-speed segment when trim is null (untrimmed file)", () => {
+    const speedRange: SpeedRange = {
+      start: 10,
+      end: 20,
+      speed: 2.0,
+      fitTarget: false,
+    };
+    const args = buildFfmpegArgs(
+      "in.mp4",
+      "out.mp4",
+      p480,
+      null,
+      "keep",
+      "default",
+      false,
+      [],
+      speedRange,
+    );
+
+    expect(args).toContain("-filter_complex");
+    const fc = args[args.indexOf("-filter_complex") + 1];
+    expect(fc).toContain("trim=start=0:end=10");
+    expect(fc).toContain("trim=start=10:end=20");
+    expect(fc).toContain("trim=start=20,setpts=PTS-STARTPTS[v2]");
+    expect(fc).toContain("atrim=start=20,asetpts=PTS-STARTPTS[a2]");
+    expect(fc).toContain("concat=n=3:v=1:a=1");
+  });
+
+  it("includes bounded post-speed segment when trim is null with explicit duration", () => {
+    const speedRange: SpeedRange = {
+      start: 10,
+      end: 20,
+      speed: 2.0,
+      fitTarget: false,
+    };
+    const args = buildFfmpegArgs(
+      "in.mp4",
+      "out.mp4",
+      p480,
+      null,
+      "keep",
+      "default",
+      false,
+      [],
+      speedRange,
+      false,
+      true,
+      50,
+    );
+
+    expect(args).toContain("-filter_complex");
+    const fc = args[args.indexOf("-filter_complex") + 1];
+    expect(fc).toContain("trim=start=20:end=50,setpts=PTS-STARTPTS[v2]");
+    expect(fc).toContain("atrim=start=20:end=50,asetpts=PTS-STARTPTS[a2]");
+    expect(fc).toContain("concat=n=3:v=1:a=1");
   });
 });
 
@@ -320,6 +376,12 @@ describe("solveSpeedMultiplier", () => {
     const speed = solveSpeedMultiplier(100, 60, null, 10, 50);
     expect(speed).toBe(1.05);
   });
+  it("guards against non-finite or <= 0 targetDuration by returning 1.0", () => {
+    expect(solveSpeedMultiplier(NaN, 60, null, 10, 50)).toBe(1.0);
+    expect(solveSpeedMultiplier(Number.POSITIVE_INFINITY, 60, null, 10, 50)).toBe(1.0);
+    expect(solveSpeedMultiplier(0, 60, null, 10, 50)).toBe(1.0);
+    expect(solveSpeedMultiplier(-15, 60, null, 10, 50)).toBe(1.0);
+  });
 });
 
 describe("buildSpeedFiltergraph", () => {
@@ -376,8 +438,22 @@ describe("buildSpeedFiltergraph", () => {
       normalize: true,
     });
 
-    expect(res.filterComplex).toContain(";[acat]loudnorm[aout]");
+    expect(res.filterComplex).toContain(`;[acat]${LOUDNORM}[aout]`);
     expect(res.mapArgs).toEqual(["-map", "[vout]", "-map", "[aout]"]);
+  });
+  it("emits open-ended post-speed segment when trim is null", () => {
+    const res = buildSpeedFiltergraph({
+      trim: null,
+      speedRange: { start: 5, end: 15, speed: 3.0, fitTarget: false },
+      height: 720,
+      hasAudio: true,
+      audio: "keep",
+      normalize: false,
+    });
+
+    expect(res.filterComplex).toContain("[0:v]trim=start=15,setpts=PTS-STARTPTS[v2]");
+    expect(res.filterComplex).toContain("[0:a]atrim=start=15,asetpts=PTS-STARTPTS[a2]");
+    expect(res.filterComplex).toContain("concat=n=3:v=1:a=1");
   });
 });
 

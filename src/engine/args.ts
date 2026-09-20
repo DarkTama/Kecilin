@@ -108,6 +108,9 @@ export function solveSpeedMultiplier(
   speedRangeStart: number,
   speedRangeEnd: number,
 ): number {
+  if (!Number.isFinite(targetDuration) || targetDuration <= 0) {
+    return 1.0;
+  }
   const tStart = trim?.start ?? 0;
   const tEnd = trim?.end ?? totalDuration;
   const sStart = Math.max(tStart, Math.min(tEnd, speedRangeStart));
@@ -131,12 +134,13 @@ export function buildSpeedFiltergraph(options: {
   hasAudio: boolean;
   audio: AudioOpt;
   normalize: boolean;
+  duration?: number;
 }): { filterComplex: string; mapArgs: string[] } {
-  const { trim, speedRange, height, normalize } = options;
+  const { trim, speedRange, height, normalize, duration } = options;
   const hasAudio = options.hasAudio && options.audio !== "mute";
 
   const tStart = trim?.start ?? 0;
-  const tEnd = trim?.end;
+  const tEnd = trim?.end ?? duration;
 
   const sStart =
     tEnd !== undefined
@@ -186,14 +190,27 @@ export function buildSpeedFiltergraph(options: {
     }
   }
 
-  // 3. Post-speed segment: [S_end, T_end] if S_end < T_end - 0.001
-  if (tEnd !== undefined && sEnd < tEnd - 0.001) {
+  // 3. Post-speed segment: [S_end, T_end] if S_end < T_end - 0.001, or open-ended [S_end, ...) if tEnd is undefined
+  if (tEnd !== undefined) {
+    if (sEnd < tEnd - 0.001) {
+      const idx = segLabels.length;
+      const vLabel = `v${idx}`;
+      chains.push(`[0:v]trim=start=${fmt(sEnd)}:end=${fmt(tEnd)},setpts=PTS-STARTPTS[${vLabel}]`);
+      if (hasAudio) {
+        const aLabel = `a${idx}`;
+        chains.push(`[0:a]atrim=start=${fmt(sEnd)}:end=${fmt(tEnd)},asetpts=PTS-STARTPTS[${aLabel}]`);
+        segLabels.push({ v: vLabel, a: aLabel });
+      } else {
+        segLabels.push({ v: vLabel });
+      }
+    }
+  } else {
     const idx = segLabels.length;
     const vLabel = `v${idx}`;
-    chains.push(`[0:v]trim=start=${fmt(sEnd)}:end=${fmt(tEnd)},setpts=PTS-STARTPTS[${vLabel}]`);
+    chains.push(`[0:v]trim=start=${fmt(sEnd)},setpts=PTS-STARTPTS[${vLabel}]`);
     if (hasAudio) {
       const aLabel = `a${idx}`;
-      chains.push(`[0:a]atrim=start=${fmt(sEnd)}:end=${fmt(tEnd)},asetpts=PTS-STARTPTS[${aLabel}]`);
+      chains.push(`[0:a]atrim=start=${fmt(sEnd)},asetpts=PTS-STARTPTS[${aLabel}]`);
       segLabels.push({ v: vLabel, a: aLabel });
     } else {
       segLabels.push({ v: vLabel });
@@ -221,7 +238,7 @@ export function buildSpeedFiltergraph(options: {
   if (hasAudio) {
     const audioFilters: string[] = [];
     if (normalize) {
-      audioFilters.push("loudnorm");
+      audioFilters.push(LOUDNORM);
     }
     if (options.audio === "75") audioFilters.push("volume=0.75");
     else if (options.audio === "50") audioFilters.push("volume=0.5");
@@ -256,6 +273,7 @@ export function buildFfmpegArgs(
   speedRange?: SpeedRange | null,
   stripMetadata?: boolean,
   hasAudio?: boolean,
+  duration?: number,
 ): string[];
 export function buildFfmpegArgs(
   input: string,
@@ -268,6 +286,7 @@ export function buildFfmpegArgs(
   extra?: string[],
   speedRange?: SpeedRange | null,
   stripMetadata?: boolean,
+  duration?: number,
 ): string[];
 export function buildFfmpegArgs(
   input: string,
@@ -280,7 +299,8 @@ export function buildFfmpegArgs(
   arg8?: string[],
   arg9?: SpeedRange | null,
   arg10?: boolean,
-  arg11?: boolean,
+  arg11?: boolean | number,
+  arg12?: number,
 ): string[] {
   let audioOpt: AudioOpt = "keep";
   let audioSource: AudioSource = "default";
@@ -289,6 +309,7 @@ export function buildFfmpegArgs(
   let speedRange: SpeedRange | null = null;
   let stripMetadata = false;
   let hasAudio = true;
+  let duration: number | undefined = undefined;
   let speedPreset: "slow" | "veryfast" = "slow";
   let encoder: string | null = null;
   let legacyOpts: AudioArgOpts | null = null;
@@ -301,6 +322,7 @@ export function buildFfmpegArgs(
     speedRange = (arg9 as SpeedRange | null) ?? null;
     stripMetadata = typeof arg10 === "boolean" ? arg10 : false;
     hasAudio = typeof arg11 === "boolean" ? arg11 : true;
+    duration = typeof arg12 === "number" ? arg12 : undefined;
   } else if (audio && typeof audio === "object") {
     legacyOpts = audio;
     speedPreset = (arg6 as "slow" | "veryfast") ?? "slow";
@@ -308,6 +330,7 @@ export function buildFfmpegArgs(
     extraArgs = (arg8 as string[]) ?? [];
     speedRange = (arg9 as SpeedRange | null) ?? null;
     stripMetadata = typeof arg10 === "boolean" ? arg10 : false;
+    duration = typeof arg11 === "number" ? arg11 : undefined;
 
     audioOpt = (audio.level ?? "keep") as AudioOpt;
     audioSource = (audio.source ?? "default") as AudioSource;
@@ -331,6 +354,7 @@ export function buildFfmpegArgs(
       hasAudio: !mute && hasAudio,
       audio: audioOpt,
       normalize,
+      duration,
     });
     a.push("-filter_complex", fg.filterComplex);
     a.push(...fg.mapArgs);
