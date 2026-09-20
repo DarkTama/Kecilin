@@ -384,7 +384,7 @@ function TrimEditor({
     }
     const max = duration ?? Number.POSITIVE_INFINITY;
     if (which === "start") {
-      const ns = Math.min(Math.max(0, v), speedEnd - 0.1);
+      const ns = Math.max(0, Math.min(Math.max(0, v), speedEnd - 0.1));
       setSpeedStart(ns);
       setSpeedStartText(fmtTime(ns));
     } else {
@@ -451,11 +451,13 @@ function TrimEditor({
 
   // Active trim interval for speed calculations
   const activeTrim =
-    ranges.length === 0
-      ? start <= 0.05 && duration != null && end >= duration - 0.05
-        ? null
-        : { start, end }
-      : null;
+    ranges.length === 1
+      ? { start: ranges[0].start, end: ranges[0].end }
+      : ranges.length === 0
+        ? start <= 0.05 && duration != null && end >= duration - 0.05
+          ? null
+          : { start, end }
+        : null;
 
   const targetSeconds = parseFloat(targetDurationInput) || 30;
 
@@ -496,8 +498,6 @@ function TrimEditor({
         end >= duration - 0.05 &&
         !singleCustomName.trim();
       out = full ? [] : [{ start, end, customName: singleCustomName.trim() || undefined }];
-    } else if (out.length === 1 && singleCustomName.trim()) {
-      out = [{ ...out[0], customName: singleCustomName.trim() }];
     }
     setTrims(file.path, out);
     setSpeedRange(index, currentSpeedRange);
@@ -683,12 +683,21 @@ function TrimEditor({
                   );
                   setRanges(updated);
                   setTrimCustomName(index, i, val);
+                  if (i === 0) {
+                    setSingleCustomName(val);
+                  }
                 }}
                 className="w-28 rounded border border-emerald-700/60 bg-slate-950/80 px-1.5 py-0.5 text-xs text-emerald-200 placeholder:text-emerald-700/50 focus:border-emerald-400 focus:outline-none font-mono"
               />
               <span>{fmtTime(r.start)}–{fmtTime(r.end)}</span>
               <button
-                onClick={() => setRanges(ranges.filter((_, j) => j !== i))}
+                onClick={() => {
+                  const next = ranges.filter((_, j) => j !== i);
+                  setRanges(next);
+                  if (next.length === 0) {
+                    setSingleCustomName("");
+                  }
+                }}
                 className="text-emerald-400 hover:text-white ml-0.5"
                 title={t("removePart")}
               >
@@ -965,20 +974,17 @@ function TrimEditor({
         </span>
 
         {/* Per-Trim Direct Filename Editor for single trim */}
-        {ranges.length <= 1 && (
+        {ranges.length === 0 && (
           <label className="flex items-center gap-1.5 text-xs text-slate-300" title={t("outputFilenamePlaceholder")}>
             <span className="text-slate-400 font-mono">📁</span>
             <input
               type="text"
               value={singleCustomName}
-              placeholder={outputName(file.path, preset, ranges.length === 1 ? 1 : null, namingPattern)}
+              placeholder={outputName(file.path, preset, null, namingPattern)}
               onChange={(e) => {
                 const val = e.target.value;
                 setSingleCustomName(val);
                 setTrimCustomName(index, 0, val);
-                if (ranges.length === 1) {
-                  setRanges([{ ...ranges[0], customName: val || undefined }]);
-                }
               }}
               className="w-44 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none font-mono"
             />
