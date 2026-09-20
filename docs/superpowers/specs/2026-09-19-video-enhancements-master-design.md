@@ -11,7 +11,7 @@
 
 Kecilin is a lightweight desktop app for compressing and splitting videos to fit WhatsApp compatibility and file size limits without command-line flags or quality degradation.
 
-This specification unifies eight core user enhancements into a cohesive, single-pass pipeline:
+This specification unifies nine core user enhancements into a cohesive, single-pass pipeline:
 1. **Persistent Custom Length**: Restores last custom split seconds across sessions.
 2. **Safe Source Video Deletion**: Moves source file to OS Recycle Bin after verified conversion success.
 3. **"Apply to All" Batch Actions**: One-click distribution of audio and split settings across queued files.
@@ -20,7 +20,7 @@ This specification unifies eight core user enhancements into a cohesive, single-
 6. **Low CPU Priority Mode**: Runs ffmpeg sidecar at `BELOW_NORMAL_PRIORITY_CLASS` on Windows to keep system responsive.
 7. **Metadata Stripping**: Enforces `-map_metadata -1` to wipe GPS, camera, and device tags for privacy.
 8. **Range Speed-Up / Fast-Forward**: Allows accelerating a designated sub-interval of the video, with `atempo` audio sync, dynamic timeline duration calculation, and target duration fitting.
-
+9. **Smart Accelerated Preview Generation**: Stream remux for compatible formats, hardware-accelerated decode, real-time generation progress, and abort-on-cancel.
 ---
 
 ## 2. Architecture & Data Structures
@@ -150,6 +150,23 @@ On Windows, spawn ffmpeg with creation flags:
   4. Call `trash::delete(&source_path)`.
   5. Any trash failure is logged and surfaced as a non-fatal warning; the batch does not halt.
 
+### 4.3 Smart Preview Generation Pipeline
+When WebView2 cannot natively decode input file (HEVC, MKV container, AV1 without codecs):
+
+1. **Fast Remux Check**:
+   - Probe video and audio codec using `ffprobe`.
+   - If video track is `h264` and audio is `aac` (common in MKV screen recordings):
+     Execute lossless remux into MP4 container with `-c copy -movflags +faststart`.
+     Duration: $< 1\text{s}$ even for large multi-gigabyte recordings.
+2. **Hardware-Accelerated Fallback Encode**:
+   - If re-encode required (e.g. HEVC $\to$ H.264):
+     Pass `-hwaccel auto` before `-i` to utilize NVDEC/QSV/AMF decode.
+     Keep low resolution: `-vf scale=-2:360` with `-c:v libx264 -preset veryfast -crf 28`.
+3. **Real-time Progress & Process Cancellation**:
+   - Pass `-progress pipe:1` to ffmpeg child process.
+   - Emit Tauri event `preview-progress` with `{ path, percent }`.
+   - Store running child handle keyed by file path in app state. If user closes trim dialog or deletes queue item, terminate preview child process immediately.
+   - In `FileRow.tsx`, replace static "Preparing preview..." with active progress bar and percentage display.
 ---
 
 ## 5. UI Components & User Flow
