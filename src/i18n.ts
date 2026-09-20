@@ -140,6 +140,12 @@ const en = {
   outputFilenamePlaceholder: "Output filename",
   frameStepBack: "-1 Frame",
   frameStepFwd: "+1 Frame",
+  batchActions: "Batch Actions ({n} videos)",
+  splitAll30: "⚡ Split All: 30s Status",
+  splitAllCustom: "⚡ Split All: Custom",
+  copyAudioAll: "Copy Audio Settings to All",
+  resetAllTrims: "Reset All Trims",
+  audioCopiedToast: "Audio settings copied to all videos",
 };
 
 export type Key = keyof typeof en;
@@ -280,6 +286,12 @@ const id: Record<Key, string> = {
   outputFilenamePlaceholder: "Nama file hasil",
   frameStepBack: "-1 Frame",
   frameStepFwd: "+1 Frame",
+  batchActions: "Tindakan Massal ({n} video)",
+  splitAll30: "⚡ Bagi Semua: 30 dtk Status",
+  splitAllCustom: "⚡ Bagi Semua: Kustom",
+  copyAudioAll: "Salin Pengaturan Audio ke Semua",
+  resetAllTrims: "Atur Ulang Semua Potongan",
+  audioCopiedToast: "Pengaturan audio disalin ke semua video",
 };
 
 const dict: Record<Lang, Record<Key, string>> = { en, id };

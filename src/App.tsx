@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FileRow } from "./FileRow";
 import { engine, IS_WEB } from "./engine";
 import { slug } from "./engine/args";
@@ -40,7 +40,23 @@ export default function App() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [draft, setDraft] = useState({ name: "", height: 1080, crf: 20, maxrateKbps: 6000, level: "4.2" });
+  const [audioCopiedToast, setAudioCopiedToast] = useState(false);
+  const audioToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (audioToastTimerRef.current) clearTimeout(audioToastTimerRef.current);
+    };
+  }, []);
+
+  function copyAudioSettingsToAll() {
+    s.copyAudioToAll(0);
+    setAudioCopiedToast(true);
+    if (audioToastTimerRef.current) clearTimeout(audioToastTimerRef.current);
+    audioToastTimerRef.current = setTimeout(() => {
+      setAudioCopiedToast(false);
+    }, 2000);
+  }
   useEffect(() => {
     engine.check().catch((e) => useStore.getState().setFfmpegError(String(e)));
     engine.checkForUpdates();
@@ -453,6 +469,59 @@ export default function App() {
                 </div>
               )}
             </div>
+            {!s.converting && s.files.length >= 2 && (
+              <div className="flex flex-col gap-2 rounded-xl border border-[#1E293B] bg-[#0F172A] p-3 shadow-md">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-md bg-slate-800 px-2.5 py-1 text-xs font-semibold text-slate-300">
+                      {t("batchActions", { n: s.files.length })}
+                    </span>
+                    {audioCopiedToast && (
+                      <span
+                        role="status"
+                        aria-live="polite"
+                        className="flex items-center gap-1 rounded-md border border-emerald-800/60 bg-emerald-950/80 px-2.5 py-1 text-xs font-medium text-emerald-300 transition-opacity"
+                      >
+                        <span>✓</span>
+                        <span>{t("audioCopiedToast")}</span>
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => s.autoSplitAll(30)}
+                      className="rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 hover:border-slate-500 hover:bg-slate-700 hover:text-white transition"
+                    >
+                      {t("splitAll30")}
+                    </button>
+                    {s.lastCustomLen > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => s.autoSplitAll(s.lastCustomLen)}
+                        className="rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 hover:border-slate-500 hover:bg-slate-700 hover:text-white transition"
+                      >
+                        {t("splitAllCustom")}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={copyAudioSettingsToAll}
+                      className="rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 hover:border-slate-500 hover:bg-slate-700 hover:text-white transition"
+                    >
+                      {t("copyAudioAll")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => s.clearAllTrims()}
+                      className="rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 hover:border-slate-500 hover:bg-slate-700 hover:text-white transition"
+                    >
+                      {t("resetAllTrims")}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {s.files.length === 0 ? (
               <div className="rounded-xl border border-slate-800 bg-slate-900 px-4 py-8 text-center text-sm text-slate-400">
