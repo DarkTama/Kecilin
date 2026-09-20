@@ -16,7 +16,7 @@ This specification unifies nine core user enhancements into a cohesive, single-p
 2. **Safe Source Video Deletion**: Moves source file to OS Recycle Bin after verified conversion success.
 3. **"Apply to All" Batch Actions**: One-click distribution of audio and split settings across queued files.
 4. **One-Click Auto-Split**: Instantly slices entire video duration into fixed consecutive chunks (e.g. 30s Status parts).
-5. **Custom Output File Naming**: Configurable template patterns with replacement tokens.
+5. **Custom Output File Naming & Per-Trim Output Renaming**: Configurable global template patterns with replacement tokens, plus direct per-part/per-trim custom output filename editing.
 6. **Low CPU Priority Mode**: Runs ffmpeg sidecar at `BELOW_NORMAL_PRIORITY_CLASS` on Windows to keep system responsive.
 7. **Metadata Stripping**: Enforces `-map_metadata -1` to wipe GPS, camera, and device tags for privacy.
 8. **Range Speed-Up / Fast-Forward**: Allows accelerating a designated sub-interval of the video, with `atempo` audio sync, dynamic timeline duration calculation, and target duration fitting.
@@ -27,7 +27,12 @@ This specification unifies nine core user enhancements into a cohesive, single-p
 
 ### 2.1 State & Persistence (`src/store.ts`)
 
-```typescript
+export type Trim = {
+  start: number;
+  end: number;
+  customName?: string; // Optional user-specified output filename override
+};
+
 export type SpeedRange = {
   start: number;           // start timestamp in seconds
   end: number;             // end timestamp in seconds
@@ -77,6 +82,13 @@ Supported replacement tokens:
 
 Sanitization replaces characters `[\\/:*?"<>|]` with `_`. If multiple parts exist but `{part}` is missing from the template, `_partN` is automatically suffixed to prevent overwriting.
 
+#### 3.2.1 Per-Trim Direct Output Name Override
+- If a trim segment has a user-defined `customName` (non-empty string):
+  - Sanitize characters `[\\/:*?"<>|]` $\to$ `_`.
+  - Guarantee `.mp4` extension (appended if omitted).
+  - Overrides global template for that specific segment.
+- If `customName` is empty or undefined:
+  - Resolve filename via global template pattern (`{name}_whatsapp_{preset}{part}`).
 ### 3.3 Range Speed-Up Filtergraph Construction
 
 Given source clip range $[T_{start}, T_{end}]$ and active speed range $[S_{start}, S_{end}]$ with multiplier $S$:
@@ -188,6 +200,9 @@ Displayed above file list when queue has $\ge 2$ items:
 ### 5.3 Advanced Settings Panel
 - Low CPU Priority toggle.
 - Strip Metadata toggle.
+- **Per-Trim Filename Editor**:
+  - Single trim: Inline text field next to trim duration showing destination filename, editable on click.
+  - Multi-part split: Inline rename badge / input on each part chip, allowing custom naming like `Highlight_Kill.mp4` or `Part_01_Intro.mp4`.
 - Custom Naming Pattern input with tag helpers.
 - "Move source file to Recycle Bin on success" checkbox with confirmation dialog.
 
