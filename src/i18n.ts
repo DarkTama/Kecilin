@@ -130,7 +130,17 @@ const en = {
   applyParts: "Apply {n} part(s)",
   trimStart: "Trim start",
   trimEnd: "Trim end",
-} as const;
+  speedRamp: "Speed Ramp (Fast Forward)",
+  speedMultiplier: "Speed multiplier",
+  fitTargetDuration: "Fit Target Duration",
+  targetDurationLabel: "Target duration",
+  effectiveDurationLabel: "Original: {orig} → Output: {out} ({saved})",
+  timeSaved: "Saves {t}",
+  autoSplitBtn: "⚡ Auto-Split into {len} Parts",
+  outputFilenamePlaceholder: "Output filename",
+  frameStepBack: "-1 Frame",
+  frameStepFwd: "+1 Frame",
+};
 
 export type Key = keyof typeof en;
 
@@ -260,6 +270,16 @@ const id: Record<Key, string> = {
   applyParts: "Terapkan {n} bagian",
   trimStart: "Awal potongan",
   trimEnd: "Akhir potongan",
+  speedRamp: "Percepat (Fast Forward)",
+  speedMultiplier: "Kelipatan kecepatan",
+  fitTargetDuration: "Sesuaikan Durasi Target",
+  targetDurationLabel: "Durasi target",
+  effectiveDurationLabel: "Asli: {orig} → Hasil: {out} ({saved})",
+  timeSaved: "Hemat {t}",
+  autoSplitBtn: "⚡ Bagi Otomatis ke Bagian {len}",
+  outputFilenamePlaceholder: "Nama file hasil",
+  frameStepBack: "-1 Frame",
+  frameStepFwd: "+1 Frame",
 };
 
 const dict: Record<Lang, Record<Key, string>> = { en, id };
