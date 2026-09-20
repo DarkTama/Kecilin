@@ -5,19 +5,35 @@ import type {
   Overwrite,
   PresetSpec,
   Summary,
-  Trim,
   VideoFile,
 } from "../store";
+
+export type Trim = {
+  start: number;
+  end: number;
+  customName?: string;
+};
+
+export type SpeedRange = {
+  start: number;
+  end: number;
+  speed: number;
+  fitTarget: boolean;
+  targetDuration?: number;
+};
 
 export type BatchItemSpec = {
   path: string;
   duration: number | null;
   trims: Trim[];
+  speedRange?: SpeedRange | null;
   audio: AudioOpt;
   audioSource: AudioSource;
   normalize: boolean;
   audioTracks: number;
 };
+
+export type BatchItem = BatchItemSpec;
 
 export type BatchOptions = {
   preset: PresetSpec;
@@ -27,6 +43,10 @@ export type BatchOptions = {
   /** null = CPU x264; "nvenc" | "amf" | "qsv" (desktop only). */
   encoder: string | null;
   extraArgs: string[];
+  lowPriority?: boolean;
+  stripMetadata?: boolean;
+  namingTemplate?: string;
+  deleteSourceToTrash?: boolean;
 };
 
 export type BatchEvents = {
