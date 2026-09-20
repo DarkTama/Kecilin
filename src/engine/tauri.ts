@@ -92,6 +92,7 @@ export const tauriEngine: Engine = {
         path: f.path,
         duration: f.duration,
         trims: f.trims,
+        speedRange: f.speedRange,
         audio: f.audio === "keep" ? null : f.audio,
         audioSource: f.audioSource === "default" ? null : String(f.audioSource),
         normalize: f.normalize,
@@ -104,6 +105,10 @@ export const tauriEngine: Engine = {
         overwrite: options.overwrite,
         encoder: options.encoder,
         extraArgs: options.extraArgs,
+        lowPriority: options.lowPriority,
+        stripMetadata: options.stripMetadata,
+        namingTemplate: options.namingTemplate,
+        deleteSourceToTrash: options.deleteSourceToTrash,
       },
     });
   },

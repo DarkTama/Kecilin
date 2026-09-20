@@ -48,7 +48,7 @@ export default function App() {
 
   function insertNamingToken(token: string) {
     const input = namingInputRef.current;
-    if (input) {
+    if (input && document.activeElement === input) {
       const start = input.selectionStart ?? s.namingPattern.length;
       const end = input.selectionEnd ?? s.namingPattern.length;
       const cur = s.namingPattern;
@@ -60,9 +60,28 @@ export default function App() {
         input.setSelectionRange(pos, pos);
       });
     } else {
-      s.setNamingPattern(s.namingPattern + token);
+      const next = s.namingPattern + token;
+      s.setNamingPattern(next);
+      if (input) {
+        requestAnimationFrame(() => {
+          input.focus();
+          const pos = next.length;
+          input.setSelectionRange(pos, pos);
+        });
+      }
     }
   }
+
+  useEffect(() => {
+    if (!showTrashConfirm) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowTrashConfirm(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showTrashConfirm]);
 
   useEffect(() => {
     return () => {
@@ -494,6 +513,7 @@ export default function App() {
                           key={token}
                           type="button"
                           disabled={s.converting}
+                          onMouseDown={(e) => e.preventDefault()}
                           onClick={() => insertNamingToken(token)}
                           className="rounded bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-0.5 font-mono text-[11px] transition disabled:opacity-50"
                         >
