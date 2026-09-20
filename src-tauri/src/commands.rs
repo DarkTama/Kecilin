@@ -13,6 +13,60 @@ use tauri_plugin_shell::ShellExt;
 /// Video extensions the scanner accepts (same list as compress.bat).
 const VIDEO_EXTS: [&str; 5] = ["mp4", "mov", "mkv", "avi", "webm"];
 
+pub static PREVIEW_TASKS: std::sync::LazyLock<Mutex<HashMap<String, u32>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static PREVIEW_CHILDREN: std::sync::LazyLock<Mutex<HashMap<String, CommandChild>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static PREVIEW_CANCELLED: std::sync::LazyLock<Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn kill_pid(pid: u32) {
+    #[cfg(windows)]
+    unsafe {
+        extern "system" {
+            fn OpenProcess(
+                dwDesiredAccess: u32,
+                bInheritHandle: i32,
+                dwProcessId: u32,
+            ) -> *mut std::ffi::c_void;
+            fn TerminateProcess(hProcess: *mut std::ffi::c_void, uExitCode: u32) -> i32;
+            fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+        }
+        const PROCESS_TERMINATE: u32 = 0x0001;
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
+}
+
+pub fn abort_all_previews() {
+    if let Ok(mut cancelled) = PREVIEW_CANCELLED.lock() {
+        if let Ok(tasks) = PREVIEW_TASKS.lock() {
+            for key in tasks.keys() {
+                cancelled.insert(key.clone());
+            }
+        }
+    }
+    if let Ok(mut children) = PREVIEW_CHILDREN.lock() {
+        for (_, child) in children.drain() {
+            let _ = child.kill();
+        }
+    }
+    if let Ok(mut tasks) = PREVIEW_TASKS.lock() {
+        for (_, pid) in tasks.drain() {
+            kill_pid(pid);
+        }
+    }
+}
+
 /// A preset: one of the three built-ins (verbatim from compress.bat) or a
 /// user-defined one from the Advanced panel.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -201,6 +255,12 @@ struct FileProgress {
 }
 
 #[derive(Serialize, Clone)]
+pub struct PreviewProgress {
+    pub path: String,
+    pub percent: u32,
+}
+
+#[derive(Serialize, Clone)]
 struct FileDone {
     index: usize,
     ok: bool,
@@ -223,6 +283,42 @@ pub(crate) fn parse_audio_tracks(stderr: &str) -> usize {
         .lines()
         .filter(|l| l.contains("Stream #") && l.contains("Audio:"))
         .count()
+}
+
+/// Parse the primary video and audio codecs from ffmpeg stderr header.
+pub(crate) fn parse_codecs(stderr: &str) -> (Option<String>, Option<String>) {
+    let mut video = None;
+    let mut audio = None;
+    for line in stderr.lines() {
+        if !line.contains("Stream #") {
+            continue;
+        }
+        if video.is_none() && line.contains(": Video: ") {
+            if let Some(pos) = line.find(": Video: ") {
+                let rest = &line[pos + ": Video: ".len()..];
+                let codec: String = rest
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != ',' && *c != '(')
+                    .collect();
+                if !codec.is_empty() {
+                    video = Some(codec.to_lowercase());
+                }
+            }
+        }
+        if audio.is_none() && line.contains(": Audio: ") {
+            if let Some(pos) = line.find(": Audio: ") {
+                let rest = &line[pos + ": Audio: ".len()..];
+                let codec: String = rest
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != ',' && *c != '(')
+                    .collect();
+                if !codec.is_empty() {
+                    audio = Some(codec.to_lowercase());
+                }
+            }
+        }
+    }
+    (video, audio)
 }
 
 /// Parse `Duration: HH:MM:SS.cc` from ffmpeg's stderr header. `N/A` → None.
@@ -612,33 +708,228 @@ fn cache_file(app: &AppHandle, sub: &str, path: &str, ext: &str) -> Result<PathB
     Ok(dir.join(format!("{:016x}.{ext}", stable_hash(&key))))
 }
 
-/// Re-encode a small H.264/AAC proxy so the webview can preview formats it
-/// can't decode natively (HEVC, .mkv, .avi, …). Cached; cheap `veryfast` 360p.
+/// Re-encode a small H.264/AAC proxy or remux so the webview can preview formats it
+/// can't decode natively (HEVC, .mkv, .avi, …).
 #[tauri::command]
 pub async fn prepare_preview(app: AppHandle, path: String) -> Result<String, String> {
     let out = cache_file(&app, "previews", &path, "mp4")?;
     let out_str = out.to_str().ok_or("cache path is not valid UTF-8")?.to_string();
     if out.exists() {
+        let _ = app.emit(
+            "preview-progress",
+            PreviewProgress {
+                path: path.clone(),
+                percent: 100,
+            },
+        );
         return Ok(out_str);
     }
-    let output = ffmpeg(&app)?
-        .args([
-            "-y", "-i", &path, "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn",
-            "-vf", "scale=-2:360", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-ar", "48000",
-            "-movflags", "+faststart", &out_str,
-        ])
+
+    if let Ok(mut cancelled) = PREVIEW_CANCELLED.lock() {
+        cancelled.remove(&path);
+    }
+
+    // Probe duration and stream codecs from ffmpeg header
+    let probe_out = ffmpeg(&app)?
+        .args(["-hide_banner", "-i", &path])
         .output()
         .await
         .map_err(|e| e.to_string())?;
-    if !output.status.success() || !out.exists() {
+    let probe_stderr = String::from_utf8_lossy(&probe_out.stderr);
+    let duration = parse_duration_secs(&probe_stderr);
+    let (video_codec, audio_codec) = parse_codecs(&probe_stderr);
+
+    // If video is h264 and audio is aac or absent: instant stream copy remux (<1s)
+    let can_remux = video_codec.as_deref() == Some("h264")
+        && (audio_codec.is_none() || audio_codec.as_deref() == Some("aac"));
+
+    if can_remux {
+        let (mut rx, child) = ffmpeg(&app)?
+            .args([
+                "-y", "-i", &path, "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn",
+                "-c", "copy", "-movflags", "+faststart", &out_str,
+            ])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+
+        let pid = child.pid();
+        if let Ok(mut tasks) = PREVIEW_TASKS.lock() {
+            tasks.insert(path.clone(), pid);
+        }
+        if let Ok(mut children) = PREVIEW_CHILDREN.lock() {
+            children.insert(path.clone(), child);
+        }
+
+        let mut code: Option<i32> = None;
+        while let Some(ev) = rx.recv().await {
+            if let CommandEvent::Terminated(t) = ev {
+                code = t.code;
+            }
+        }
+
+        if let Ok(mut tasks) = PREVIEW_TASKS.lock() {
+            tasks.remove(&path);
+        }
+        if let Ok(mut children) = PREVIEW_CHILDREN.lock() {
+            children.remove(&path);
+        }
+
+        let user_cancelled = PREVIEW_CANCELLED
+            .lock()
+            .map(|mut s| s.remove(&path))
+            .unwrap_or(false);
+
+        if user_cancelled {
+            let _ = fs::remove_file(&out);
+            return Err("preview cancelled".into());
+        }
+
+        if code == Some(0) && out.exists() {
+            let _ = app.emit(
+                "preview-progress",
+                PreviewProgress {
+                    path: path.clone(),
+                    percent: 100,
+                },
+            );
+            return Ok(out_str);
+        }
+
         let _ = fs::remove_file(&out);
-        return Err(last_error_line(
-            &String::from_utf8_lossy(&output.stderr),
-            output.status.code(),
-        ));
     }
+
+    // Transcode required (HEVC, AV1, VP9, non-AAC audio, etc.)
+    let (mut rx, child) = ffmpeg(&app)?
+        .args([
+            "-y",
+            "-hwaccel", "auto",
+            "-i", &path,
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-sn",
+            "-dn",
+            "-vf", "scale=-2:360",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-ac", "2",
+            "-ar", "48000",
+            "-movflags", "+faststart",
+            "-progress", "pipe:1",
+            &out_str,
+        ])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let pid = child.pid();
+    if let Ok(mut tasks) = PREVIEW_TASKS.lock() {
+        tasks.insert(path.clone(), pid);
+    }
+    if let Ok(mut children) = PREVIEW_CHILDREN.lock() {
+        children.insert(path.clone(), child);
+    }
+
+    let denom_us = duration.map(|d| (d * 1_000_000.0) as u64);
+    let mut stderr_tail = String::new();
+    let mut code: Option<i32> = None;
+    let mut last_pct: Option<u32> = None;
+    let mut last_emit = Instant::now() - Duration::from_secs(1);
+
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            CommandEvent::Stdout(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    if let Some(us) = parse_progress_us(line) {
+                        if let Some(denom) = denom_us {
+                            if denom > 0 {
+                                let pct = (((us as f64) / (denom as f64)) * 100.0).clamp(0.0, 100.0) as u32;
+                                if last_pct != Some(pct) && (last_emit.elapsed() >= Duration::from_millis(150) || pct == 100) {
+                                    last_pct = Some(pct);
+                                    last_emit = Instant::now();
+                                    let _ = app.emit(
+                                        "preview-progress",
+                                        PreviewProgress {
+                                            path: path.clone(),
+                                            percent: pct,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            CommandEvent::Stderr(bytes) => {
+                stderr_tail.push_str(&String::from_utf8_lossy(&bytes));
+                stderr_tail.push('\n');
+                if stderr_tail.len() > 8192 {
+                    let cut = stderr_tail.len() - 8192;
+                    stderr_tail.drain(..cut);
+                }
+            }
+            CommandEvent::Error(e) => {
+                stderr_tail.push_str(&e);
+                stderr_tail.push('\n');
+            }
+            CommandEvent::Terminated(t) => code = t.code,
+            _ => {}
+        }
+    }
+
+    if let Ok(mut tasks) = PREVIEW_TASKS.lock() {
+        tasks.remove(&path);
+    }
+    if let Ok(mut children) = PREVIEW_CHILDREN.lock() {
+        children.remove(&path);
+    }
+
+    let user_cancelled = PREVIEW_CANCELLED
+        .lock()
+        .map(|mut s| s.remove(&path))
+        .unwrap_or(false);
+
+    if user_cancelled {
+        let _ = fs::remove_file(&out);
+        return Err("preview cancelled".into());
+    }
+
+    if code != Some(0) || !out.exists() {
+        let _ = fs::remove_file(&out);
+        return Err(last_error_line(&stderr_tail, code));
+    }
+
+    let _ = app.emit(
+        "preview-progress",
+        PreviewProgress {
+            path: path.clone(),
+            percent: 100,
+        },
+    );
     Ok(out_str)
+}
+
+#[tauri::command]
+pub async fn cancel_preview(app: AppHandle, path: String) -> Result<(), String> {
+    if let Ok(mut cancelled) = PREVIEW_CANCELLED.lock() {
+        cancelled.insert(path.clone());
+    }
+    if let Ok(mut children) = PREVIEW_CHILDREN.lock() {
+        if let Some(child) = children.remove(&path) {
+            let _ = child.kill();
+        }
+    }
+    if let Ok(mut tasks) = PREVIEW_TASKS.lock() {
+        if let Some(pid) = tasks.remove(&path) {
+            kill_pid(pid);
+        }
+    }
+    if let Ok(out) = cache_file(&app, "previews", &path, "mp4") {
+        let _ = fs::remove_file(&out);
+    }
+    Ok(())
 }
 
 /// One frame as a small JPEG for the queue row. Seeks ~10% in (capped at 30s);
@@ -1718,5 +2009,43 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
         assert!(src_file.exists(), "Source file should NOT be deleted if output path matches source");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn test_parse_codecs_h264_aac() {
+        let stderr = r#"
+Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 1920x1080 [SAR 1:1 DAR 16:9], 1150 kb/s, 30 fps
+Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, stereo, fltp, 128 kb/s (default)
+"#;
+        let (v, a) = parse_codecs(stderr);
+        assert_eq!(v.as_deref(), Some("h264"));
+        assert_eq!(a.as_deref(), Some("aac"));
+    }
+
+    #[test]
+    fn test_parse_codecs_hevc_opus() {
+        let stderr = r#"
+Stream #0:0: Video: hevc (Main), yuv420p(tv), 3840x2160, 60 fps
+Stream #0:1(eng): Audio: opus, 48000 Hz, stereo, fltp
+"#;
+        let (v, a) = parse_codecs(stderr);
+        assert_eq!(v.as_deref(), Some("hevc"));
+        assert_eq!(a.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn test_parse_codecs_video_only() {
+        let stderr = r#"
+Stream #0:0: Video: h264, yuv420p, 1280x720, 24 fps
+"#;
+        let (v, a) = parse_codecs(stderr);
+        assert_eq!(v.as_deref(), Some("h264"));
+        assert_eq!(a, None);
+    }
+
+    #[test]
+    fn test_parse_codecs_empty() {
+        let (v, a) = parse_codecs("");
+        assert_eq!(v, None);
+        assert_eq!(a, None);
     }
 }

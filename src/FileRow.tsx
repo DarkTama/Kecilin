@@ -218,7 +218,34 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
   // re-encoded by the bundled ffmpeg. "none" only if even that fails.
   const [src, setSrc] = useState(() => engine.mediaSrc(file.path));
   const [preview, setPreview] = useState<"native" | "preparing" | "proxy" | "none">("native");
+  const [proxyProgress, setProxyProgress] = useState(0);
   const triedProxy = useRef(false);
+  const previewRef = useRef(preview);
+  previewRef.current = preview;
+
+  useEffect(() => {
+    return () => {
+      if (previewRef.current === "preparing") {
+        void engine.cancelPreviewProxy?.(file.path);
+      }
+    };
+  }, [file.path]);
+
+  function handleClose() {
+    if (previewRef.current === "preparing") {
+      void engine.cancelPreviewProxy?.(file.path);
+    }
+    onClose();
+  }
+
+  async function handleCancelProxy() {
+    setPreview("none");
+    try {
+      await engine.cancelPreviewProxy?.(file.path);
+    } catch {
+      // ignore
+    }
+  }
   const [duration, setDuration] = useState<number | null>(file.duration);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState<number | null>(null);
@@ -243,12 +270,20 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
       return;
     }
     triedProxy.current = true;
+    setProxyProgress(0);
     setPreview("preparing");
     try {
-      setSrc(await engine.preparePreviewProxy(file.path));
-      setPreview("proxy");
+      const proxySrc = await engine.preparePreviewProxy(file.path, (pct) => {
+        setProxyProgress(pct);
+      });
+      if (previewRef.current === "preparing") {
+        setSrc(proxySrc);
+        setPreview("proxy");
+      }
     } catch {
-      setPreview("none");
+      if (previewRef.current === "preparing") {
+        setPreview("none");
+      }
     }
   }
 
@@ -309,7 +344,7 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
       out = full ? [] : [{ start, end }];
     }
     setTrims(file.path, out);
-    onClose();
+    handleClose();
   }
 
   function togglePlay() {
@@ -367,7 +402,33 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
           }}
         />
       )}
-      {preview === "preparing" && <p className="text-xs text-slate-400">{t("preparing")}</p>}
+      {preview === "preparing" && (
+        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-slate-300">
+              {t("preparingPreview")}
+            </span>
+            <button
+              type="button"
+              onClick={handleCancelProxy}
+              className="rounded border border-slate-700 px-2 py-0.5 text-xs text-slate-400 hover:border-slate-600 hover:bg-slate-800 hover:text-white transition-colors"
+            >
+              {t("cancelPreview")}
+            </button>
+          </div>
+          <div className="mt-2.5 flex items-center gap-3">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800">
+              <div
+                className="h-full bg-emerald-500 transition-all duration-200 ease-out"
+                style={{ width: `${proxyProgress}%` }}
+              />
+            </div>
+            <span className="w-9 text-right text-xs font-mono text-emerald-400">
+              {proxyProgress}%
+            </span>
+          </div>
+        </div>
+      )}
       {preview === "none" && <p className="text-xs text-slate-400">{t("noPreview")}</p>}
 
       {duration != null && duration > 0 && (
@@ -543,14 +604,14 @@ function TrimEditor({ file, onClose }: { file: FileState; onClose: () => void })
             <button
               onClick={() => {
                 setTrims(file.path, []);
-                onClose();
+                handleClose();
               }}
               className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800"
             >
               {t("clear")}
             </button>
           )}
-          <button onClick={onClose} className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800">
+          <button onClick={handleClose} className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800">
             {t("cancel")}
           </button>
           <button

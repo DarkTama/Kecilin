@@ -304,6 +304,7 @@ export const wasmEngine: Engine = {
 
   preparePreviewProxy: () =>
     Promise.reject(new Error("proxy previews aren't available in the browser")),
+  cancelPreviewProxy: async () => {},
 
   async prepareThumbnail(path, duration): Promise<Thumb> {
     const file = sourceFiles.get(path);
