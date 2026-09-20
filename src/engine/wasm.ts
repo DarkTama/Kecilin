@@ -121,7 +121,14 @@ async function convertOne(
     for (let segIdx = 0; segIdx < segCount; segIdx++) {
       const trim = item.trims[segIdx] ?? null;
       const part = item.trims.length > 1 ? segIdx + 1 : null;
-      const outName = outputName(file.name, opts.preset.name, part);
+      const outName = outputName(
+        file.name,
+        opts.preset.name,
+        part,
+        opts.namingTemplate,
+        trim?.customName,
+        opts.preset.height,
+      );
       const denomUs =
         (trim ? Math.max(0, trim.end - trim.start) : (item.duration ?? 0)) * 1_000_000;
       const args = buildFfmpegArgs(
@@ -138,6 +145,9 @@ async function convertOne(
         "veryfast", // wasm is slow enough already
         null, // no GPU encoders in the browser
         opts.extraArgs,
+        item.speedRange ?? null,
+        opts.stripMetadata ?? false,
+        item.duration ?? undefined,
       );
       const onProgress = (e: { progress: number; time: number }) => {
         const segPct =

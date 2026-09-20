@@ -338,7 +338,10 @@ export function buildFfmpegArgs(
     hasAudio = audio.level !== "mute";
   }
 
-  const isSpeedActive = speedRange != null && speedRange.speed > 1.0;
+  const isSpeedActive =
+    speedRange != null &&
+    speedRange.speed > 1.0 &&
+    speedRange.end > speedRange.start + 0.05;
   const mute = legacyOpts ? legacyOpts.level === "mute" : (!hasAudio || audioOpt === "mute");
 
   const a: string[] = ["-y"];

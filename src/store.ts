@@ -160,7 +160,7 @@ export type StoreState = {
   setStripMetadata: (strip: boolean) => void;
   setNamingPattern: (pattern: string) => void;
   setDeleteSourceToTrash: (del: boolean) => void;
-  setSpeedRange: (index: number, speedRange: SpeedRange | null) => void;
+  setSpeedRange: (target: string | number, speedRange: SpeedRange | null) => void;
   setTrimCustomName: (fileIndex: number, trimIndex: number, customName: string) => void;
 
   copyAudioToAll: (sourceIndex: number) => void;
@@ -307,9 +307,13 @@ export const useStore = create<Store>()(
       setStripMetadata: (stripMetadata) => set({ stripMetadata }),
       setNamingPattern: (namingPattern) => set({ namingPattern }),
       setDeleteSourceToTrash: (deleteSourceToTrash) => set({ deleteSourceToTrash }),
-      setSpeedRange: (index, speedRange) =>
+      setSpeedRange: (target, speedRange) =>
         set((s) => ({
-          files: s.files.map((f, i) => (i === index ? { ...f, speedRange } : f)),
+          files: s.files.map((f, i) =>
+            (typeof target === "string" ? f.path === target : i === target)
+              ? { ...f, speedRange }
+              : f,
+          ),
         })),
       setTrimCustomName: (fileIndex, trimIndex, customName) =>
         set((s) => ({
@@ -328,7 +332,13 @@ export const useStore = create<Store>()(
           if (!src) return s;
           const { audio, audioSource, normalize } = src;
           return {
-            files: s.files.map((f) => ({ ...f, audio, audioSource, normalize })),
+          files: s.files.map((f) => {
+            let safeAudioSource = audioSource;
+            if (typeof audioSource === "number") {
+              safeAudioSource = f.audioTracks > audioSource ? audioSource : "default";
+            }
+            return { ...f, audio, audioSource: safeAudioSource, normalize };
+          }),
           };
         }),
 

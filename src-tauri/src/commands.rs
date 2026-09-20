@@ -421,17 +421,27 @@ pub(crate) fn build_ffmpeg_args(
     encoder: Option<&str>,
     extra: &[String],
     strip_metadata: bool,
+    speed_range: Option<&SpeedRange>,
+    duration: Option<f64>,
 ) -> Vec<String> {
+    let is_speed_active = speed_range
+        .map(|s| s.speed > 1.0 && s.end > s.start + 0.05)
+        .unwrap_or(false);
+    let mute = audio.level == Some("mute");
+
     let mut a: Vec<String> = vec!["-y".into()];
     if let Some(t) = trim {
-        push_strs(&mut a, &["-ss", &format!("{:.3}", t.start)]);
+        if !is_speed_active {
+            push_strs(&mut a, &["-ss", &format!("{:.3}", t.start)]);
+        }
     }
     push_strs(&mut a, &["-i", input]);
     if let Some(t) = trim {
-        push_strs(&mut a, &["-t", &format!("{:.3}", (t.end - t.start).max(0.0))]);
+        if !is_speed_active {
+            push_strs(&mut a, &["-t", &format!("{:.3}", (t.end - t.start).max(0.0))]);
+        }
     }
-    let vf = format!("scale=-2:{}:flags=lanczos", p.height);
-    let mute = audio.level == Some("mute");
+
     let merge = audio.source == Some("merge") && audio.track_count >= 2;
 
     // Post-source audio filters, chained in order.
@@ -446,31 +456,49 @@ pub(crate) fn build_ffmpeg_args(
         _ => {}
     }
 
-    push_strs(&mut a, &["-map", "0:v:0"]);
-    if !mute {
-        if merge {
-            // Explicit input labels; normalize=0 keeps each source at its
-            // recorded level; extra filters chain INSIDE the complex graph.
-            let inputs: String =
-                (0..audio.track_count).map(|i| format!("[0:a:{i}]")).collect();
-            let chain = if af.is_empty() { String::new() } else { format!(",{}", af.join(",")) };
-            let graph = format!(
-                "{inputs}amix=inputs={}:duration=longest:normalize=0{chain}[aout]",
-                audio.track_count
-            );
-            push_strs(&mut a, &["-filter_complex", &graph, "-map", "[aout]"]);
-        } else if let Some(idx) = audio.source.filter(|s| s.chars().all(|c| c.is_ascii_digit())) {
-            push_strs(&mut a, &["-map", &format!("0:a:{idx}")]);
-        } else {
-            push_strs(&mut a, &["-map", "0:a?"]);
+    if is_speed_active {
+        let (graph, maps) = build_speed_filtergraph(
+            trim,
+            speed_range.unwrap(),
+            p.height,
+            !mute,
+            audio.level,
+            audio.normalize,
+            duration,
+        );
+        push_strs(&mut a, &["-filter_complex", &graph]);
+        for m in maps {
+            a.push(m);
         }
+    } else {
+        let vf = format!("scale=-2:{}:flags=lanczos", p.height);
+        push_strs(&mut a, &["-map", "0:v:0"]);
+        if !mute {
+            if merge {
+                // Explicit input labels; normalize=0 keeps each source at its
+                // recorded level; extra filters chain INSIDE the complex graph.
+                let inputs: String =
+                    (0..audio.track_count).map(|i| format!("[0:a:{i}]")).collect();
+                let chain = if af.is_empty() { String::new() } else { format!(",{}", af.join(",")) };
+                let graph = format!(
+                    "{inputs}amix=inputs={}:duration=longest:normalize=0{chain}[aout]",
+                    audio.track_count
+                );
+                push_strs(&mut a, &["-filter_complex", &graph, "-map", "[aout]"]);
+            } else if let Some(idx) = audio.source.filter(|s| s.chars().all(|c| c.is_ascii_digit())) {
+                push_strs(&mut a, &["-map", &format!("0:a:{idx}")]);
+            } else {
+                push_strs(&mut a, &["-map", "0:a?"]);
+            }
+        }
+        push_strs(&mut a, &["-vf", &vf]);
     }
-    push_strs(&mut a, &["-vf", &vf]);
+
     a.extend(video_args(p, encoder));
     if mute {
         push_strs(&mut a, &["-an"]);
     } else {
-        if !merge && !af.is_empty() {
+        if !is_speed_active && !merge && !af.is_empty() {
             push_strs(&mut a, &["-af", &af.join(",")]);
         }
         push_strs(&mut a, &["-c:a", "aac", "-q:a", "2", "-ar", "48000", "-ac", "2"]);
@@ -484,6 +512,192 @@ pub(crate) fn build_ffmpeg_args(
     a
 }
 
+/// atempo accepts 0.5–2.0 per instance; chain factors to cover any speed.
+pub(crate) fn build_atempo_chain(speed: f64) -> String {
+    if speed <= 0.0 {
+        return "atempo=1.0".into();
+    }
+    let mut factors = Vec::new();
+    let mut rem = speed;
+    while rem > 2.0 {
+        factors.push(2.0);
+        rem /= 2.0;
+    }
+    while rem < 0.5 && rem > 0.0 {
+        factors.push(0.5);
+        rem /= 0.5;
+    }
+    factors.push((rem * 1000.0).round() / 1000.0);
+    factors
+        .iter()
+        .map(|f| format!("atempo={:.3}", f))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Speed-ramp filtergraph: trim → pre-speed / sped / post-speed segments →
+/// concat → scale, mirroring `buildSpeedFiltergraph` in `src/engine/args.ts`.
+pub(crate) fn build_speed_filtergraph(
+    trim: Option<&Trim>,
+    speed_range: &SpeedRange,
+    height: u32,
+    has_audio: bool,
+    audio_level: Option<&str>,
+    normalize: bool,
+    duration: Option<f64>,
+) -> (String, Vec<String>) {
+    let t_start = trim.map(|t| t.start).unwrap_or(0.0);
+    let t_end = trim.map(|t| t.end).or(duration);
+
+    let s_start = match t_end {
+        Some(te) => t_start.max(te.min(speed_range.start)),
+        None => t_start.max(speed_range.start),
+    };
+    let s_end = match t_end {
+        Some(te) => s_start.max(te.min(speed_range.end)),
+        None => s_start.max(speed_range.end),
+    };
+    let speed = speed_range.speed;
+
+    let mut chains: Vec<String> = Vec::new();
+    let mut seg_labels: Vec<(String, Option<String>)> = Vec::new();
+    let fmt = |n: f64| -> String { format!("{:.3}", n) };
+
+    // 1. Pre-speed segment
+    if s_start > t_start + 0.001 {
+        let idx = seg_labels.len();
+        let v_label = format!("v{idx}");
+        chains.push(format!(
+            "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS[{v_label}]",
+            fmt(t_start),
+            fmt(s_start)
+        ));
+        if has_audio {
+            let a_label = format!("a{idx}");
+            chains.push(format!(
+                "[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{a_label}]",
+                fmt(t_start),
+                fmt(s_start)
+            ));
+            seg_labels.push((v_label, Some(a_label)));
+        } else {
+            seg_labels.push((v_label, None));
+        }
+    }
+
+    // 2. Sped segment
+    {
+        let idx = seg_labels.len();
+        let v_label = format!("v{idx}");
+        chains.push(format!(
+            "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS,setpts=PTS/{:.3}[{v_label}]",
+            fmt(s_start),
+            fmt(s_end),
+            speed
+        ));
+        if has_audio {
+            let a_label = format!("a{idx}");
+            let atempo = build_atempo_chain(speed);
+            chains.push(format!(
+                "[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,{atempo}[{a_label}]",
+                fmt(s_start),
+                fmt(s_end)
+            ));
+            seg_labels.push((v_label, Some(a_label)));
+        } else {
+            seg_labels.push((v_label, None));
+        }
+    }
+
+    // 3. Post-speed segment
+    if let Some(te) = t_end {
+        if s_end < te - 0.001 {
+            let idx = seg_labels.len();
+            let v_label = format!("v{idx}");
+            chains.push(format!(
+                "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS[{v_label}]",
+                fmt(s_end),
+                fmt(te)
+            ));
+            if has_audio {
+                let a_label = format!("a{idx}");
+                chains.push(format!(
+                    "[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{a_label}]",
+                    fmt(s_end),
+                    fmt(te)
+                ));
+                seg_labels.push((v_label, Some(a_label)));
+            } else {
+                seg_labels.push((v_label, None));
+            }
+        }
+    } else {
+        let idx = seg_labels.len();
+        let v_label = format!("v{idx}");
+        chains.push(format!(
+            "[0:v]trim=start={},setpts=PTS-STARTPTS[{v_label}]",
+            fmt(s_end)
+        ));
+        if has_audio {
+            let a_label = format!("a{idx}");
+            chains.push(format!(
+                "[0:a]atrim=start={},asetpts=PTS-STARTPTS[{a_label}]",
+                fmt(s_end)
+            ));
+            seg_labels.push((v_label, Some(a_label)));
+        } else {
+            seg_labels.push((v_label, None));
+        }
+    }
+
+    let count = seg_labels.len();
+    let mut concat_inputs = String::new();
+    for (v, a) in &seg_labels {
+        concat_inputs.push_str(&format!("[{v}]"));
+        if has_audio {
+            if let Some(a_label) = a {
+                concat_inputs.push_str(&format!("[{a_label}]"));
+            }
+        }
+    }
+
+    let concat_filter = format!(
+        "{concat_inputs}concat=n={count}:v=1:a={}[vcat]{}",
+        if has_audio { 1 } else { 0 },
+        if has_audio { "[acat]" } else { "" }
+    );
+    chains.push(concat_filter);
+
+    // Video scale
+    chains.push(format!("[vcat]scale=-2:{height}:flags=lanczos[vout]"));
+
+    let mut audio_out_label = "[acat]".to_string();
+    if has_audio {
+        let mut af = Vec::new();
+        if normalize {
+            af.push(LOUDNORM.to_string());
+        }
+        match audio_level {
+            Some("75") => af.push("volume=0.75".into()),
+            Some("50") => af.push("volume=0.5".into()),
+            Some("25") => af.push("volume=0.25".into()),
+            _ => {}
+        }
+        if !af.is_empty() {
+            chains.push(format!("[acat]{}[aout]", af.join(",")));
+            audio_out_label = "[aout]".to_string();
+        }
+    }
+
+    let mut map_args = vec!["-map".to_string(), "[vout]".to_string()];
+    if has_audio {
+        map_args.push("-map".to_string());
+        map_args.push(audio_out_label);
+    }
+
+    (chains.join(";"), map_args)
+}
+
 #[allow(dead_code)]
 pub(crate) fn build_args(
     input: &str,
@@ -495,7 +709,18 @@ pub(crate) fn build_args(
     extra: &[String],
     strip_metadata: bool,
 ) -> Vec<String> {
-    build_ffmpeg_args(input, output, p, trim, audio, encoder, extra, strip_metadata)
+    build_ffmpeg_args(
+        input,
+        output,
+        p,
+        trim,
+        audio,
+        encoder,
+        extra,
+        strip_metadata,
+        None,
+        None,
+    )
 }
 
 /// Per-platform advice when ffmpeg can't run.
@@ -743,6 +968,11 @@ pub async fn prepare_preview(app: AppHandle, path: String) -> Result<String, Str
     let can_remux = video_codec.as_deref() == Some("h264")
         && (audio_codec.is_none() || audio_codec.as_deref() == Some("aac"));
 
+    if PREVIEW_CANCELLED.lock().map(|s| s.contains(&path)).unwrap_or(false) {
+        let _ = fs::remove_file(&out);
+        return Err("preview cancelled".into());
+    }
+
     if can_remux {
         let (mut rx, child) = ffmpeg(&app)?
             .args([
@@ -799,6 +1029,11 @@ pub async fn prepare_preview(app: AppHandle, path: String) -> Result<String, Str
     }
 
     // Transcode required (HEVC, AV1, VP9, non-AAC audio, etc.)
+    if PREVIEW_CANCELLED.lock().map(|s| s.contains(&path)).unwrap_or(false) {
+        let _ = fs::remove_file(&out);
+        return Err("preview cancelled".into());
+    }
+
     let (mut rx, child) = ffmpeg(&app)?
         .args([
             "-y",
@@ -1441,6 +1676,8 @@ async fn convert_segment(
         opts.encoder.as_deref(),
         &opts.extra_args,
         opts.strip_metadata,
+        item.speed_range.as_ref(),
+        item.duration,
     );
     let (mut rx, child) = ffmpeg(app)
         .map_err(fail)?
@@ -1575,7 +1812,7 @@ mod tests {
     }
 
     fn args(input: &str, output: &str, preset: &str, trim: Option<&Trim>, a: AudioOpts) -> Vec<String> {
-        build_ffmpeg_args(input, output, &builtin_preset(preset).unwrap(), trim, a, None, &[], false)
+        build_ffmpeg_args(input, output, &builtin_preset(preset).unwrap(), trim, a, None, &[], false, None, None)
     }
 
     #[test]
@@ -1681,7 +1918,7 @@ mod tests {
     fn gpu_encoders_swap_the_video_block_and_keep_the_ceiling() {
         let p = builtin_preset("720p").unwrap();
         for (enc, codec) in [("nvenc", "h264_nvenc"), ("amf", "h264_amf"), ("qsv", "h264_qsv")] {
-            let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some(enc), &[], false);
+            let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some(enc), &[], false, None, None);
             assert!(a.contains(&codec.to_string()), "{enc}");
             assert!(!a.contains(&"libx264".to_string()), "{enc}");
             assert!(!a.iter().any(|x| x == "-x264-params"), "{enc}");
@@ -1690,7 +1927,7 @@ mod tests {
             assert!(a.contains(&"-c:a".to_string()), "{enc}: audio block intact");
         }
         // Unknown encoder ids fall back to x264.
-        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some("vhs"), &[], false);
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some("vhs"), &[], false, None, None);
         assert!(a.contains(&"libx264".to_string()));
     }
 
@@ -1698,7 +1935,7 @@ mod tests {
     fn extra_args_land_right_before_the_output() {
         let p = builtin_preset("480p").unwrap();
         let extra = vec!["-metadata".to_string(), "title=x".to_string()];
-        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &extra, false);
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &extra, false, None, None);
         let n = a.len();
         assert_eq!(&a[n - 3..], &["-metadata", "title=x", "out.mp4"]);
         assert_eq!(a[n - 4], "-nostats");
@@ -1800,13 +2037,95 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
     #[test]
     fn metadata_stripping_appends_flag_before_output() {
         let p = builtin_preset("480p").unwrap();
-        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], true);
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], true, None, None);
         let n = a.len();
         assert_eq!(&a[n - 3..], &["-map_metadata", "-1", "out.mp4"]);
         assert_eq!(a[n - 4], "-nostats");
 
-        let a_off = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], false);
+        let a_off = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], false, None, None);
         assert!(!a_off.contains(&"-map_metadata".to_string()));
+    }
+
+    #[test]
+    fn atempo_chain_splits_out_of_range_speeds() {
+        assert_eq!(build_atempo_chain(1.0), "atempo=1.000");
+        assert_eq!(build_atempo_chain(2.0), "atempo=2.000");
+        assert_eq!(build_atempo_chain(4.0), "atempo=2.000,atempo=2.000");
+        assert_eq!(build_atempo_chain(0.25), "atempo=0.500,atempo=0.500");
+        assert_eq!(build_atempo_chain(0.0), "atempo=1.0");
+    }
+
+    #[test]
+    fn speed_filtergraph_trims_and_concats_three_segments() {
+        let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
+        let sr = SpeedRange {
+            start: 3.0,
+            end: 6.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let (graph, maps) =
+            build_speed_filtergraph(Some(&trim), &sr, 480, true, Some("50"), true, None);
+        assert!(graph.contains("[0:v]trim=start=1.000:end=3.000,setpts=PTS-STARTPTS[v0]"));
+        assert!(graph.contains("[0:v]trim=start=3.000:end=6.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v1]"));
+        assert!(graph.contains("[0:v]trim=start=6.000:end=10.000,setpts=PTS-STARTPTS[v2]"));
+        assert!(graph.contains("concat=n=3:v=1:a=1[vcat][acat]"));
+        assert!(graph.contains("[vcat]scale=-2:480:flags=lanczos[vout]"));
+        assert!(graph.contains(&format!("[acat]{LOUDNORM},volume=0.5[aout]")));
+        assert_eq!(maps, vec!["-map", "[vout]", "-map", "[aout]"]);
+    }
+
+    #[test]
+    fn speedup_args_use_filtergraph_without_ss_or_to() {
+        let p = builtin_preset("480p").unwrap();
+        let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
+        let sr = SpeedRange {
+            start: 3.0,
+            end: 6.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let a = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            AudioOpts::default(),
+            None,
+            &[],
+            false,
+            Some(&sr),
+            None,
+        );
+        assert!(!a.contains(&"-ss".to_string()));
+        assert!(!a.contains(&"-vf".to_string()));
+        assert!(a.contains(&"-filter_complex".to_string()));
+        assert!(a.contains(&"[vout]".to_string()));
+        assert!(a.iter().any(|s| s == "libx264"));
+        // A no-op range (end == start) must fall back to the plain path.
+        let flat = SpeedRange {
+            start: 3.0,
+            end: 3.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let b = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            AudioOpts::default(),
+            None,
+            &[],
+            false,
+            Some(&flat),
+            None,
+        );
+        assert!(b.contains(&"-vf".to_string()));
+        assert!(!b.contains(&"-filter_complex".to_string()));
     }
 
     #[test]

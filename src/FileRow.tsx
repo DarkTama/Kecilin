@@ -3,7 +3,7 @@ import { engine } from "./engine";
 import { calculateEffectiveDuration, outputName, solveSpeedMultiplier } from "./engine/args";
 import { fmtSize, fmtTime, parseTime } from "./format";
 import { useT } from "./i18n";
-import { useStore } from "./store";
+import { resolvePreset, useStore } from "./store";
 import type { AudioOpt, FileState, SpeedRange, Trim } from "./store";
 
 // Thumbnails are extracted one at a time — each is an ffmpeg spawn.
@@ -236,7 +236,7 @@ function TrimEditor({
   const setLastCustomLen = useStore((st) => st.setLastCustomLen);
   const preset = useStore((st) => st.preset);
   const namingPattern = useStore((st) => st.namingPattern);
-
+  const customPresets = useStore((st) => st.customPresets);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   // Native playback first; when the webview can't decode the file (HEVC
   // without the Windows codec, .mkv/.avi, …) fall back to a small H.264 proxy
@@ -500,7 +500,7 @@ function TrimEditor({
       out = full ? [] : [{ start, end, customName: singleCustomName.trim() || undefined }];
     }
     setTrims(file.path, out);
-    setSpeedRange(index, currentSpeedRange);
+    setSpeedRange(file.path, currentSpeedRange);
     handleClose();
   }
 
@@ -674,7 +674,7 @@ function TrimEditor({
               <input
                 type="text"
                 value={r.customName ?? ""}
-                placeholder={outputName(file.path, preset, i + 1, namingPattern)}
+                placeholder={outputName(file.path, preset, i + 1, namingPattern, undefined, resolvePreset(preset, customPresets).height)}
                 title={t("outputFilenamePlaceholder")}
                 onChange={(e) => {
                   const val = e.target.value;
@@ -980,7 +980,7 @@ function TrimEditor({
             <input
               type="text"
               value={singleCustomName}
-              placeholder={outputName(file.path, preset, null, namingPattern)}
+              placeholder={outputName(file.path, preset, null, namingPattern, undefined, resolvePreset(preset, customPresets).height)}
               onChange={(e) => {
                 const val = e.target.value;
                 setSingleCustomName(val);
