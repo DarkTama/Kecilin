@@ -750,6 +750,19 @@ pub(crate) fn current_date_ymd() -> String {
         .unwrap_or(0);
     days_to_ymd((secs / 86400) as i64)
 }
+fn extract_stem(stem_or_path: &str) -> &str {
+    for ext in &VIDEO_EXTS {
+        let dot_ext_len = ext.len() + 1;
+        if stem_or_path.len() > dot_ext_len
+            && stem_or_path.is_char_boundary(stem_or_path.len() - dot_ext_len)
+            && stem_or_path[stem_or_path.len() - dot_ext_len..].eq_ignore_ascii_case(&format!(".{ext}"))
+        {
+            let base = &stem_or_path[..stem_or_path.len() - dot_ext_len];
+            return Path::new(base).file_name().and_then(|n| n.to_str()).unwrap_or(base);
+        }
+    }
+    Path::new(stem_or_path).file_name().and_then(|n| n.to_str()).unwrap_or(stem_or_path)
+}
 
 /// Computes output filename respecting custom names and naming templates.
 pub(crate) fn output_filename(
@@ -779,7 +792,10 @@ pub(crate) fn output_filename_internal(
         if !trimmed.is_empty() {
             let sanitized = sanitize_filename(trimmed);
             if !sanitized.is_empty() {
-                return if sanitized.to_lowercase().ends_with(".mp4") {
+                return if sanitized.len() >= 4
+                    && sanitized.is_char_boundary(sanitized.len() - 4)
+                    && sanitized[sanitized.len() - 4..].eq_ignore_ascii_case(".mp4")
+                {
                     sanitized
                 } else {
                     format!("{sanitized}.mp4")
@@ -788,10 +804,7 @@ pub(crate) fn output_filename_internal(
         }
     }
 
-    let stem = Path::new(stem_or_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(stem_or_path);
+    let stem = extract_stem(stem_or_path);
 
     // 2. Otherwise, if opts.naming_template is provided, substitute tokens {name}, {stem}, {preset}, {part}, {resolution}, {date}.
     if let Some(tmpl) = template.map(str::trim).filter(|s| !s.is_empty()) {
@@ -821,19 +834,31 @@ pub(crate) fn output_filename_internal(
             ("{date}", &date_str),
         ];
         for (tok, val) in tokens {
-            let tok_lower = tok.to_lowercase();
-            let mut i = 0;
-            while i < resolved.len() {
-                if resolved[i..].to_lowercase().starts_with(&tok_lower) {
-                    resolved.replace_range(i..i + tok.len(), val);
-                    i += val.len();
+            let tok_len = tok.len();
+            let mut result = String::with_capacity(resolved.len());
+            let mut remaining = resolved.as_str();
+            while !remaining.is_empty() {
+                if remaining.len() >= tok_len
+                    && remaining.is_char_boundary(tok_len)
+                    && remaining[..tok_len].eq_ignore_ascii_case(tok)
+                {
+                    result.push_str(val);
+                    remaining = &remaining[tok_len..];
                 } else {
-                    i += 1;
+                    let mut chars = remaining.chars();
+                    if let Some(c) = chars.next() {
+                        result.push(c);
+                        remaining = chars.as_str();
+                    }
                 }
             }
+            resolved = result;
         }
 
-        if resolved.to_lowercase().ends_with(".mp4") {
+        if resolved.len() >= 4
+            && resolved.is_char_boundary(resolved.len() - 4)
+            && resolved[resolved.len() - 4..].eq_ignore_ascii_case(".mp4")
+        {
             resolved.truncate(resolved.len() - 4);
         }
         let mut sanitized = sanitize_filename(&resolved);
@@ -902,13 +927,31 @@ pub(crate) fn maybe_delete_source_to_trash(
         let p = Path::new(&o.path);
         p.exists() && fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
     });
-    if all_valid {
-        if let Err(e) = trash::delete(Path::new(item_path)) {
-            eprintln!(
-                "Warning: failed to move source file {} to trash: {}",
-                item_path, e
-            );
-        }
+    if !all_valid {
+        return;
+    }
+
+    // Guard against collision: do not delete if any output path equals source path.
+    let source_path = Path::new(item_path);
+    let source_canon = fs::canonicalize(source_path).ok();
+    let collision = outputs.iter().any(|o| {
+        let out_path = Path::new(&o.path);
+        out_path == source_path
+            || (source_canon.is_some() && fs::canonicalize(out_path).ok() == source_canon)
+    });
+    if collision {
+        eprintln!(
+            "Warning: skipping trash deletion because output file collides with source: {}",
+            item_path
+        );
+        return;
+    }
+
+    if let Err(e) = trash::delete(source_path) {
+        eprintln!(
+            "Warning: failed to move source file {} to trash: {}",
+            item_path, e
+        );
     }
 }
 
@@ -1613,5 +1656,67 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
             delete_source_to_trash: false,
         };
         ffmpeg_cmd(&mut cmd, &opts);
+    }
+    #[test]
+    fn test_unicode_stem_and_template() {
+        let p = builtin_preset("480p").unwrap();
+        // Non-ASCII in stem: "liburan_🌴"
+        let out = output_filename("liburan_🌴", &p, None, Some("{name}_{preset}"), None);
+        assert_eq!(out, "liburan_🌴_480p.mp4");
+
+        // Non-ASCII in template: "vidéo_{name}_{resolution}"
+        let out2 = output_filename("clip", &p, None, Some("vidéo_{name}_{resolution}"), None);
+        assert_eq!(out2, "vidéo_clip_480p.mp4");
+
+        // Non-ASCII in both stem, custom name, and template
+        let out3 = output_filename("vacances_2026_🏖️", &p, Some(1), Some("{date}_{name}{part}"), None);
+        assert!(out3.contains("vacances_2026_🏖️_part1.mp4"));
+    }
+
+    #[test]
+    fn test_multi_dot_stems() {
+        let p = builtin_preset("480p").unwrap();
+        // Path with multiple dots: "clip.2024.final.mp4"
+        let input = Path::new("vids/clip.2024.final.mp4");
+        let path = output_path_full(input, &p, None, None, None, None).unwrap();
+        assert_eq!(
+            path,
+            Path::new("vids/whatsapp_480p/clip.2024.final_whatsapp_480p.mp4")
+        );
+
+        // Direct call to output_filename with multi-dot stem
+        let out = output_filename("archive.2026.09", &p, None, Some("{name}_{preset}"), None);
+        assert_eq!(out, "archive.2026.09_480p.mp4");
+    }
+
+    #[test]
+    fn test_trash_collision_guard() {
+        let dir = std::env::temp_dir().join(format!("kecilin-trash-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let src_file = dir.join("collision.mp4");
+        fs::write(&src_file, b"sample content").unwrap();
+
+        let opts = BatchOptions {
+            preset: builtin_preset("480p").unwrap(),
+            out_dir: None,
+            parallel: 1,
+            overwrite: "overwrite".into(),
+            encoder: None,
+            extra_args: vec![],
+            low_priority: false,
+            strip_metadata: false,
+            naming_template: None,
+            delete_source_to_trash: true,
+        };
+
+        // Output points to same path as source -> must not delete!
+        let colliding_outputs = vec![OutputFile {
+            path: src_file.to_str().unwrap().to_string(),
+            size: 14,
+        }];
+        maybe_delete_source_to_trash(src_file.to_str().unwrap(), &opts, &colliding_outputs, false);
+        assert!(src_file.exists(), "Source file should NOT be deleted if output path matches source");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
