@@ -334,7 +334,7 @@ export const useStore = create<Store>()(
 
       autoSplitAll: (partSeconds) =>
         set((s) => {
-          if (partSeconds <= 0) return s;
+          if (!Number.isFinite(partSeconds) || partSeconds <= 0) return s;
           return {
             files: s.files.map((f) => {
               if (!f.duration || f.duration <= 0) return f;

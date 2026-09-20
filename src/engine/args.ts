@@ -113,9 +113,106 @@ export function buildFfmpegArgs(
   return a;
 }
 
-/** `{stem}_whatsapp_{preset}[_partN].mp4` — same naming as the desktop app. */
-export function outputName(inputName: string, presetName: string, part: number | null): string {
-  const stem = inputName.replace(/\.[^.]+$/, "");
-  const suffix = part != null ? `_part${part}` : "";
-  return `${stem}_whatsapp_${slug(presetName)}${suffix}.mp4`;
+function formatDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}${m}${day}`;
+}
+
+/**
+ * Replaces any character in [\\/:*?"<>|] with _.
+ * Trims leading and trailing whitespace and periods.
+ */
+export function sanitizeFilename(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, "_").replace(/^[\s.]+|[\s.]+$/g, "");
+}
+
+export function resolveOutputFilename(options: {
+  stem: string;
+  presetName: string;
+  height?: number;
+  part?: number | null;
+  totalParts?: number;
+  pattern?: string; // default: "{name}_whatsapp_{preset}{part}"
+  customName?: string;
+  now?: Date;
+}): string {
+  // Direct customName override
+  if (options.customName && options.customName.trim().length > 0) {
+    const sanitized = sanitizeFilename(options.customName.trim());
+    if (sanitized.length > 0) {
+      return /\.mp4$/i.test(sanitized) ? sanitized : `${sanitized}.mp4`;
+    }
+  }
+
+  const base = options.stem.split(/[/\\]/).pop() ?? options.stem;
+  const lastDot = base.lastIndexOf(".");
+  const stem = lastDot > 0 ? base.slice(0, lastDot) : base;
+
+  const rawPattern =
+    options.pattern && options.pattern.trim().length > 0
+      ? options.pattern
+      : "{name}_whatsapp_{preset}{part}";
+
+  const patternHadPart = /{part}/i.test(rawPattern);
+
+  const partSuffix =
+    options.part != null && options.part > 0 ? `_part${options.part}` : "";
+  const resolution =
+    options.height != null && options.height > 0
+      ? `${options.height}p`
+      : options.presetName;
+  const dateStr = formatDate(options.now ?? new Date());
+
+  const tokens: Record<string, string> = {
+    "{name}": stem,
+    "{stem}": stem,
+    "{preset}": slug(options.presetName),
+    "{part}": partSuffix,
+    "{resolution}": resolution,
+    "{date}": dateStr,
+  };
+
+  let resolved = rawPattern.replace(
+    /{(name|stem|preset|part|resolution|date)}/gi,
+    (m) => tokens[m.toLowerCase()] ?? m,
+  );
+
+  resolved = resolved.replace(/\.mp4$/i, "");
+  resolved = sanitizeFilename(resolved);
+
+  const isMultiPart =
+    (options.totalParts !== undefined ? options.totalParts > 1 : true) &&
+    options.part != null &&
+    options.part > 0;
+
+  if (isMultiPart && !patternHadPart && !resolved.includes(`_part${options.part}`)) {
+    resolved = `${resolved}_part${options.part}`;
+  }
+
+  if (!resolved) {
+    resolved = "output";
+  }
+
+  return `${resolved}.mp4`;
+}
+
+/** `{stem}_whatsapp_{preset}[_partN].mp4` — delegates to resolveOutputFilename. */
+export function outputName(
+  srcPath: string,
+  presetName: string,
+  part: number | null,
+  pattern?: string,
+  customName?: string,
+  height?: number,
+): string {
+  return resolveOutputFilename({
+    stem: srcPath,
+    presetName,
+    height,
+    part,
+    pattern,
+    customName,
+  });
 }

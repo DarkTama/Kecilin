@@ -2,7 +2,7 @@
 // must stay byte-for-byte in sync (this one feeds ffmpeg.wasm on the web).
 import { describe, expect, it } from "vitest";
 import { BUILTIN_PRESETS } from "../store";
-import { buildFfmpegArgs, LOUDNORM, outputName, slug } from "./args";
+import { buildFfmpegArgs, LOUDNORM, outputName, resolveOutputFilename, sanitizeFilename, slug } from "./args";
 
 const p360 = BUILTIN_PRESETS[0];
 const p480 = BUILTIN_PRESETS[1];
@@ -73,6 +73,19 @@ describe("buildFfmpegArgs", () => {
   });
 });
 
+describe("sanitizeFilename", () => {
+  it("replaces illegal characters with underscores", () => {
+    expect(sanitizeFilename("foo/bar\\baz:qux*one?two\"three<four>five|six")).toBe(
+      "foo_bar_baz_qux_one_two_three_four_five_six",
+    );
+  });
+
+  it("trims leading and trailing whitespace and periods", () => {
+    expect(sanitizeFilename("  ...my_file.mp4...  ")).toBe("my_file.mp4");
+    expect(sanitizeFilename(" . foo:bar . ")).toBe("foo_bar");
+  });
+});
+
 describe("naming", () => {
   it("mirrors the desktop naming and slugging", () => {
     expect(outputName("clip.mkv", "480p", null)).toBe("clip_whatsapp_480p.mp4");
@@ -80,5 +93,152 @@ describe("naming", () => {
     expect(slug("My Phone (HD)!")).toBe("My_Phone__HD");
     expect(slug("***")).toBe("custom");
     expect(outputName("clip.mp4", "Story 1080", null)).toBe("clip_whatsapp_Story_1080.mp4");
+  });
+
+  it("supports default pattern with resolveOutputFilename", () => {
+    expect(
+      resolveOutputFilename({
+        stem: "clip.mkv",
+        presetName: "480p",
+        part: null,
+      }),
+    ).toBe("clip_whatsapp_480p.mp4");
+
+    expect(
+      resolveOutputFilename({
+        stem: "clip.mkv",
+        presetName: "360p",
+        part: 2,
+      }),
+    ).toBe("clip_whatsapp_360p_part2.mp4");
+  });
+
+  it("supports custom pattern with date, name, resolution, and part", () => {
+    const fixedDate = new Date(2026, 8, 20); // 2026-09-20
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "480p",
+        height: 480,
+        part: 1,
+        pattern: "{date}_{name}_{resolution}{part}",
+        now: fixedDate,
+      }),
+    ).toBe("20260920_clip_480p_part1.mp4");
+  });
+
+  it("supports {stem} token synonym", () => {
+    expect(
+      resolveOutputFilename({
+        stem: "holiday",
+        presetName: "720p",
+        height: 720,
+        part: null,
+        pattern: "{stem}_{resolution}",
+      }),
+    ).toBe("holiday_720p.mp4");
+  });
+
+  it("falls back to presetName when height is omitted or unknown", () => {
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "Story 1080",
+        pattern: "{name}_{resolution}",
+      }),
+    ).toBe("clip_Story 1080.mp4");
+  });
+
+  it("overrides template completely with customName", () => {
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "480p",
+        customName: "My Custom Highlights",
+      }),
+    ).toBe("My Custom Highlights.mp4");
+  });
+
+  it("sanitizes illegal characters in customName", () => {
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "480p",
+        customName: "Cool:Clip/1",
+      }),
+    ).toBe("Cool_Clip_1.mp4");
+  });
+
+  it("retains existing .mp4 on customName without duplicating", () => {
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "480p",
+        customName: "clip.mp4",
+      }),
+    ).toBe("clip.mp4");
+
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "480p",
+        customName: "clip.MP4",
+      }),
+    ).toBe("clip.MP4");
+  });
+
+  it("falls back to template if customName is empty or only whitespace", () => {
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "480p",
+        customName: "   ",
+      }),
+    ).toBe("clip_whatsapp_480p.mp4");
+  });
+
+  it("auto-appends _part suffix when multi-part is missing {part} token", () => {
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "480p",
+        part: 2,
+        pattern: "{name}_{preset}",
+      }),
+    ).toBe("clip_480p_part2.mp4");
+
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "480p",
+        part: 1,
+        totalParts: 2,
+        pattern: "{name}_{preset}",
+      }),
+    ).toBe("clip_480p_part1.mp4");
+  });
+
+  it("does not auto-append part suffix if totalParts is 1", () => {
+    expect(
+      resolveOutputFilename({
+        stem: "clip",
+        presetName: "480p",
+        part: 1,
+        totalParts: 1,
+        pattern: "{name}_{preset}",
+      }),
+    ).toBe("clip_480p.mp4");
+  });
+
+  it("delegates from outputName with optional arguments", () => {
+    expect(outputName("clip.mkv", "480p", null, "{name}_{preset}")).toBe(
+      "clip_480p.mp4",
+    );
+    expect(
+      outputName("clip.mkv", "480p", 2, "{name}_{preset}", "Direct Override"),
+    ).toBe("Direct Override.mp4");
+    expect(
+      outputName("clip.mkv", "480p", null, "{name}_{resolution}", undefined, 1080),
+    ).toBe("clip_1080p.mp4");
   });
 });
