@@ -27,6 +27,7 @@ pub struct PresetSpec {
 }
 
 impl PresetSpec {
+    #[allow(dead_code)]
     fn new(name: &str, height: u32, crf: u32, maxrate: &str, bufsize: &str, level: &str) -> Self {
         Self {
             name: name.into(),
@@ -39,6 +40,7 @@ impl PresetSpec {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn builtin_preset(name: &str) -> Option<PresetSpec> {
     match name {
         "360p" => Some(PresetSpec::new("360p", 360, 24, "1200k", "2400k", "3.1")),
@@ -107,10 +109,24 @@ pub struct VideoFile {
     audio_tracks: usize,
 }
 
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct Trim {
     pub start: f64,
     pub end: f64,
+    #[serde(default)]
+    pub custom_name: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeedRange {
+    pub start: f64,
+    pub end: f64,
+    pub speed: f64,
+    pub fit_target: bool,
+    pub target_duration: Option<f64>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -134,6 +150,9 @@ pub struct BatchItem {
     /// Audio stream count from the scan (needed to build the merge filter).
     #[serde(default)]
     pub audio_tracks: usize,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub speed_range: Option<SpeedRange>,
 }
 
 /// Batch-wide options from the UI (presets + the Advanced panel).
@@ -154,6 +173,14 @@ pub struct BatchOptions {
     /// Extra ffmpeg arguments appended right before the output path.
     #[serde(default)]
     pub extra_args: Vec<String>,
+    #[serde(default)]
+    pub low_priority: bool,
+    #[serde(default)]
+    pub strip_metadata: bool,
+    #[serde(default)]
+    pub naming_template: Option<String>,
+    #[serde(default)]
+    pub delete_source_to_trash: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -297,6 +324,7 @@ pub(crate) fn build_ffmpeg_args(
     audio: AudioOpts,
     encoder: Option<&str>,
     extra: &[String],
+    strip_metadata: bool,
 ) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into()];
     if let Some(t) = trim {
@@ -352,9 +380,26 @@ pub(crate) fn build_ffmpeg_args(
         push_strs(&mut a, &["-c:a", "aac", "-q:a", "2", "-ar", "48000", "-ac", "2"]);
     }
     push_strs(&mut a, &["-movflags", "+faststart", "-progress", "pipe:1", "-nostats"]);
+    if strip_metadata {
+        push_strs(&mut a, &["-map_metadata", "-1"]);
+    }
     a.extend(extra.iter().cloned());
     a.push(output.to_string());
     a
+}
+
+#[allow(dead_code)]
+pub(crate) fn build_args(
+    input: &str,
+    output: &str,
+    p: &PresetSpec,
+    trim: Option<&Trim>,
+    audio: AudioOpts,
+    encoder: Option<&str>,
+    extra: &[String],
+    strip_metadata: bool,
+) -> Vec<String> {
+    build_ffmpeg_args(input, output, p, trim, audio, encoder, extra, strip_metadata)
 }
 
 /// Per-platform advice when ffmpeg can't run.
@@ -671,14 +716,168 @@ pub fn open_output_folder(
     tauri_plugin_opener::open_path(dir, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Replaces any character in [\\/:*?"<>|] with _.
+/// Trims leading and trailing whitespace and periods.
+pub(crate) fn sanitize_filename(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            other => other,
+        })
+        .collect();
+    sanitized.trim_matches(|c: char| c.is_whitespace() || c == '.').to_string()
+}
+
+pub(crate) fn days_to_ymd(days: i64) -> String {
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}{:02}{:02}", y, m, d)
+}
+
+pub(crate) fn current_date_ymd() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    days_to_ymd((secs / 86400) as i64)
+}
+
+/// Computes output filename respecting custom names and naming templates.
+pub(crate) fn output_filename(
+    stem_or_path: &str,
+    preset: &PresetSpec,
+    part: Option<usize>,
+    template: Option<&str>,
+    trim: Option<&Trim>,
+) -> String {
+    output_filename_internal(stem_or_path, preset, part, template, trim, None)
+}
+
+pub(crate) fn output_filename_internal(
+    stem_or_path: &str,
+    preset: &PresetSpec,
+    part: Option<usize>,
+    template: Option<&str>,
+    trim: Option<&Trim>,
+    date_override: Option<&str>,
+) -> String {
+    // 1. If trim has custom_name that is non-empty:
+    //    Sanitize characters [\\/:*?"<>|] to _.
+    //    Ensure .mp4 extension.
+    //    Use it directly.
+    if let Some(custom_name) = trim.and_then(|t| t.custom_name.as_deref()) {
+        let trimmed = custom_name.trim();
+        if !trimmed.is_empty() {
+            let sanitized = sanitize_filename(trimmed);
+            if !sanitized.is_empty() {
+                return if sanitized.to_lowercase().ends_with(".mp4") {
+                    sanitized
+                } else {
+                    format!("{sanitized}.mp4")
+                };
+            }
+        }
+    }
+
+    let stem = Path::new(stem_or_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(stem_or_path);
+
+    // 2. Otherwise, if opts.naming_template is provided, substitute tokens {name}, {stem}, {preset}, {part}, {resolution}, {date}.
+    if let Some(tmpl) = template.map(str::trim).filter(|s| !s.is_empty()) {
+        let pattern_had_part = tmpl.to_lowercase().contains("{part}");
+        let date_str = match date_override {
+            Some(d) => d.to_string(),
+            None => current_date_ymd(),
+        };
+        let tag = slug(&preset.name);
+        let part_str = match part {
+            Some(n) if n > 0 => format!("_part{n}"),
+            _ => String::new(),
+        };
+        let resolution_str = if preset.height > 0 {
+            format!("{}p", preset.height)
+        } else {
+            preset.name.clone()
+        };
+
+        let mut resolved = tmpl.to_string();
+        let tokens = [
+            ("{name}", stem),
+            ("{stem}", stem),
+            ("{preset}", &tag),
+            ("{part}", &part_str),
+            ("{resolution}", &resolution_str),
+            ("{date}", &date_str),
+        ];
+        for (tok, val) in tokens {
+            let tok_lower = tok.to_lowercase();
+            let mut i = 0;
+            while i < resolved.len() {
+                if resolved[i..].to_lowercase().starts_with(&tok_lower) {
+                    resolved.replace_range(i..i + tok.len(), val);
+                    i += val.len();
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        if resolved.to_lowercase().ends_with(".mp4") {
+            resolved.truncate(resolved.len() - 4);
+        }
+        let mut sanitized = sanitize_filename(&resolved);
+
+        // Auto-append _part suffix when multi-part is missing {part} token
+        if let Some(n) = part {
+            if n > 0 && !pattern_had_part && !sanitized.ends_with(&format!("_part{n}")) {
+                sanitized = format!("{sanitized}_part{n}");
+            }
+        }
+
+        if sanitized.is_empty() {
+            "output.mp4".to_string()
+        } else {
+            format!("{sanitized}.mp4")
+        }
+    } else {
+        // 3. If no custom template is provided, preserve standard {stem}_whatsapp_{preset}[_partN].mp4
+        let tag = slug(&preset.name);
+        let suffix = part.map(|n| format!("_part{n}")).unwrap_or_default();
+        format!("{stem}_whatsapp_{tag}{suffix}.mp4")
+    }
+}
+
 /// Where a converted file lands: inside the custom output dir if set, else in
 /// `whatsapp_{preset}` next to the input (the script's layout). `part` appends
 /// `_partN` for multi-part splits.
+#[allow(dead_code)]
 pub(crate) fn output_path(
     input: &Path,
     preset: &PresetSpec,
     out_dir: Option<&str>,
     part: Option<usize>,
+) -> Option<PathBuf> {
+    output_path_full(input, preset, out_dir, part, None, None)
+}
+
+pub(crate) fn output_path_full(
+    input: &Path,
+    preset: &PresetSpec,
+    out_dir: Option<&str>,
+    part: Option<usize>,
+    template: Option<&str>,
+    trim: Option<&Trim>,
 ) -> Option<PathBuf> {
     let stem = input.file_stem()?.to_string_lossy();
     let tag = slug(&preset.name);
@@ -686,9 +885,47 @@ pub(crate) fn output_path(
         Some(d) => PathBuf::from(d),
         None => input.parent()?.join(format!("whatsapp_{tag}")),
     };
-    let suffix = part.map(|n| format!("_part{n}")).unwrap_or_default();
-    Some(dir.join(format!("{stem}_whatsapp_{tag}{suffix}.mp4")))
+    let filename = output_filename(&stem, preset, part, template, trim);
+    Some(dir.join(filename))
 }
+
+pub(crate) fn maybe_delete_source_to_trash(
+    item_path: &str,
+    opts: &BatchOptions,
+    outputs: &[OutputFile],
+    canceled: bool,
+) {
+    if !opts.delete_source_to_trash || canceled || outputs.is_empty() {
+        return;
+    }
+    let all_valid = outputs.iter().all(|o| {
+        let p = Path::new(&o.path);
+        p.exists() && fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
+    });
+    if all_valid {
+        if let Err(e) = trash::delete(Path::new(item_path)) {
+            eprintln!(
+                "Warning: failed to move source file {} to trash: {}",
+                item_path, e
+            );
+        }
+    }
+}
+
+/// When launching FFmpeg in `ffmpeg_cmd()` or wherever `tokio::process::Command` is prepared:
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+pub fn ffmpeg_cmd(cmd: &mut std::process::Command, opts: &BatchOptions) {
+    use std::os::windows::process::CommandExt;
+    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+    if opts.low_priority {
+        cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn ffmpeg_cmd(_cmd: &mut std::process::Command, _opts: &BatchOptions) {}
+
 
 /// `clip.mp4` → `clip_2.mp4`, `clip_3.mp4`, … first one that doesn't exist.
 pub(crate) fn unique_path(path: &Path) -> PathBuf {
@@ -724,6 +961,8 @@ async fn run_batch(app: AppHandle, items: Vec<BatchItem>, opts: BatchOptions) {
             let _ = app2.emit("file:start", FileStart { index });
             match convert_one(&app2, &item, &opts2, index).await {
                 Ok(outputs) => {
+                    let canceled = app2.state::<BatchState>().cancel.load(Ordering::SeqCst);
+                    maybe_delete_source_to_trash(&item.path, &opts2, &outputs, canceled);
                     let _ = app2.emit(
                         "file:done",
                         FileDone { index, ok: true, skipped: false, error: None, outputs },
@@ -823,8 +1062,15 @@ async fn convert_segment(
 ) -> Result<OutputFile, ConvErr> {
     let fail = |m: String| ConvErr::Failed(m);
     let input = Path::new(&item.path);
-    let mut out_path = output_path(input, &opts.preset, opts.out_dir.as_deref(), part)
-        .ok_or_else(|| fail("file has no name or parent".into()))?;
+    let mut out_path = output_path_full(
+        input,
+        &opts.preset,
+        opts.out_dir.as_deref(),
+        part,
+        opts.naming_template.as_deref(),
+        trim,
+    )
+    .ok_or_else(|| fail("file has no name or parent".into()))?;
     if out_path.exists() {
         match opts.overwrite.as_str() {
             "skip" => return Err(ConvErr::Skipped("output already exists".into())),
@@ -860,12 +1106,36 @@ async fn convert_segment(
         audio,
         opts.encoder.as_deref(),
         &opts.extra_args,
+        opts.strip_metadata,
     );
     let (mut rx, child) = ffmpeg(app)
         .map_err(fail)?
         .args(args)
         .spawn()
         .map_err(|e| fail(e.to_string()))?;
+
+    #[cfg(target_os = "windows")]
+    if opts.low_priority {
+        let pid = child.pid();
+        unsafe {
+            extern "system" {
+                fn OpenProcess(
+                    dwDesiredAccess: u32,
+                    bInheritHandle: i32,
+                    dwProcessId: u32,
+                ) -> *mut std::ffi::c_void;
+                fn SetPriorityClass(hProcess: *mut std::ffi::c_void, dwPriorityClass: u32) -> i32;
+                fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+            }
+            const PROCESS_SET_INFORMATION: u32 = 0x0200;
+            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+            let handle = OpenProcess(PROCESS_SET_INFORMATION, 0, pid);
+            if !handle.is_null() {
+                SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS);
+                CloseHandle(handle);
+            }
+        }
+    }
 
     let state = app.state::<BatchState>();
     if let Ok(mut map) = state.children.lock() {
@@ -971,7 +1241,7 @@ mod tests {
     }
 
     fn args(input: &str, output: &str, preset: &str, trim: Option<&Trim>, a: AudioOpts) -> Vec<String> {
-        build_ffmpeg_args(input, output, &builtin_preset(preset).unwrap(), trim, a, None, &[])
+        build_ffmpeg_args(input, output, &builtin_preset(preset).unwrap(), trim, a, None, &[], false)
     }
 
     #[test]
@@ -1012,7 +1282,7 @@ mod tests {
 
     #[test]
     fn trim_adds_input_seek_and_duration() {
-        let a = args("in.mkv", "out.mp4", "480p", Some(&Trim { start: 5.5, end: 12.0 }), AudioOpts::default());
+        let a = args("in.mkv", "out.mp4", "480p", Some(&Trim { start: 5.5, end: 12.0, custom_name: None }), AudioOpts::default());
         let i = a.iter().position(|x| x == "-i").unwrap();
         assert_eq!(&a[i - 2..i + 2], &["-ss", "5.500", "-i", "in.mkv"]);
         assert_eq!(&a[i + 2..i + 4], &["-t", "6.500"]);
@@ -1077,7 +1347,7 @@ mod tests {
     fn gpu_encoders_swap_the_video_block_and_keep_the_ceiling() {
         let p = builtin_preset("720p").unwrap();
         for (enc, codec) in [("nvenc", "h264_nvenc"), ("amf", "h264_amf"), ("qsv", "h264_qsv")] {
-            let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some(enc), &[]);
+            let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some(enc), &[], false);
             assert!(a.contains(&codec.to_string()), "{enc}");
             assert!(!a.contains(&"libx264".to_string()), "{enc}");
             assert!(!a.iter().any(|x| x == "-x264-params"), "{enc}");
@@ -1086,7 +1356,7 @@ mod tests {
             assert!(a.contains(&"-c:a".to_string()), "{enc}: audio block intact");
         }
         // Unknown encoder ids fall back to x264.
-        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some("vhs"), &[]);
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some("vhs"), &[], false);
         assert!(a.contains(&"libx264".to_string()));
     }
 
@@ -1094,7 +1364,7 @@ mod tests {
     fn extra_args_land_right_before_the_output() {
         let p = builtin_preset("480p").unwrap();
         let extra = vec!["-metadata".to_string(), "title=x".to_string()];
-        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &extra);
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &extra, false);
         let n = a.len();
         assert_eq!(&a[n - 3..], &["-metadata", "title=x", "out.mp4"]);
         assert_eq!(a[n - 4], "-nostats");
@@ -1192,5 +1462,156 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
     fn last_error_line_prefers_stderr_tail() {
         assert_eq!(last_error_line("a\nreal error here\n\n", Some(1)), "real error here");
         assert_eq!(last_error_line("", Some(1)), "ffmpeg exited with code Some(1)");
+    }
+    #[test]
+    fn metadata_stripping_appends_flag_before_output() {
+        let p = builtin_preset("480p").unwrap();
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], true);
+        let n = a.len();
+        assert_eq!(&a[n - 3..], &["-map_metadata", "-1", "out.mp4"]);
+        assert_eq!(a[n - 4], "-nostats");
+
+        let a_off = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], false);
+        assert!(!a_off.contains(&"-map_metadata".to_string()));
+    }
+
+    #[test]
+    fn sanitize_filename_replaces_illegal_and_trims() {
+        assert_eq!(
+            sanitize_filename("foo/bar\\baz:qux*one?two\"three<four>five|six"),
+            "foo_bar_baz_qux_one_two_three_four_five_six"
+        );
+        assert_eq!(sanitize_filename("  ...my_file.mp4...  "), "my_file.mp4");
+        assert_eq!(sanitize_filename(" . foo:bar . "), "foo_bar");
+    }
+
+    #[test]
+    fn naming_template_and_custom_name_parity() {
+        let p = builtin_preset("480p").unwrap();
+        // Default layout
+        assert_eq!(
+            output_filename("clip.mkv", &p, None, None, None),
+            "clip_whatsapp_480p.mp4"
+        );
+        assert_eq!(
+            output_filename("clip.mkv", &p, Some(2), None, None),
+            "clip_whatsapp_480p_part2.mp4"
+        );
+
+        // Template with date, name, resolution, and part
+        let tmpl = "{date}_{name}_{resolution}{part}";
+        assert_eq!(
+            output_filename_internal("clip", &p, Some(1), Some(tmpl), None, Some("20260920")),
+            "20260920_clip_480p_part1.mp4"
+        );
+
+        // {stem} synonym
+        assert_eq!(
+            output_filename_internal("holiday.mkv", &p, None, Some("{stem}_{resolution}"), None, None),
+            "holiday_480p.mp4"
+        );
+
+        // Custom name override directly
+        let trim_custom = Trim {
+            start: 0.0,
+            end: 10.0,
+            custom_name: Some("My Custom Highlights".into()),
+        };
+        assert_eq!(
+            output_filename("clip", &p, None, Some(tmpl), Some(&trim_custom)),
+            "My Custom Highlights.mp4"
+        );
+
+        // Sanitize illegal chars in custom name
+        let trim_illegal = Trim {
+            start: 0.0,
+            end: 10.0,
+            custom_name: Some("Cool:Clip/1".into()),
+        };
+        assert_eq!(
+            output_filename("clip", &p, None, None, Some(&trim_illegal)),
+            "Cool_Clip_1.mp4"
+        );
+
+        // Retains existing .mp4 on custom name
+        let trim_mp4 = Trim {
+            start: 0.0,
+            end: 10.0,
+            custom_name: Some("clip.mp4".into()),
+        };
+        assert_eq!(
+            output_filename("clip", &p, None, None, Some(&trim_mp4)),
+            "clip.mp4"
+        );
+
+        let trim_upper_mp4 = Trim {
+            start: 0.0,
+            end: 10.0,
+            custom_name: Some("clip.MP4".into()),
+        };
+        assert_eq!(
+            output_filename("clip", &p, None, None, Some(&trim_upper_mp4)),
+            "clip.MP4"
+        );
+
+        // Fallback if custom name is whitespace
+        let trim_empty = Trim {
+            start: 0.0,
+            end: 10.0,
+            custom_name: Some("   ".into()),
+        };
+        assert_eq!(
+            output_filename("clip", &p, None, None, Some(&trim_empty)),
+            "clip_whatsapp_480p.mp4"
+        );
+
+        // Auto-appends _part suffix when template lacks {part}
+        assert_eq!(
+            output_filename("clip", &p, Some(2), Some("{name}_{preset}"), None),
+            "clip_480p_part2.mp4"
+        );
+    }
+
+    #[test]
+    fn days_to_ymd_calculation() {
+        assert_eq!(days_to_ymd(0), "19700101");
+        assert_eq!(days_to_ymd(20716), "20260920");
+    }
+
+    #[test]
+    fn trash_deletion_guard_logic() {
+        let opts_disabled = BatchOptions {
+            preset: builtin_preset("480p").unwrap(),
+            out_dir: None,
+            parallel: 1,
+            overwrite: "overwrite".into(),
+            encoder: None,
+            extra_args: vec![],
+            low_priority: false,
+            strip_metadata: false,
+            naming_template: None,
+            delete_source_to_trash: false,
+        };
+        // When delete_source_to_trash is false, should not delete
+        maybe_delete_source_to_trash("nonexistent_test_file.mp4", &opts_disabled, &[], false);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_ffmpeg_cmd_low_priority_flag() {
+        let mut cmd = std::process::Command::new("cmd");
+        let opts = BatchOptions {
+            preset: builtin_preset("480p").unwrap(),
+            out_dir: None,
+            parallel: 1,
+            overwrite: "overwrite".into(),
+            encoder: None,
+            extra_args: vec![],
+            low_priority: true,
+            strip_metadata: false,
+            naming_template: None,
+            delete_source_to_trash: false,
+        };
+        ffmpeg_cmd(&mut cmd, &opts);
     }
 }
