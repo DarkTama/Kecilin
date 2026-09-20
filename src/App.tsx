@@ -16,6 +16,7 @@ const ENCODER_NAMES: Record<string, string> = {
   qsv: "Intel Quick Sync",
 };
 const LEVELS = ["3.0", "3.1", "4.0", "4.1", "4.2", "5.1"];
+const NAMING_TOKENS = ["{name}", "{preset}", "{part}", "{resolution}", "{date}"] as const;
 
 /** Seconds that will actually be encoded for a file (trims respected). */
 function effectiveSecs(f: FileState): number {
@@ -42,6 +43,26 @@ export default function App() {
   const [draft, setDraft] = useState({ name: "", height: 1080, crf: 20, maxrateKbps: 6000, level: "4.2" });
   const [audioCopiedToast, setAudioCopiedToast] = useState(false);
   const audioToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [showTrashConfirm, setShowTrashConfirm] = useState(false);
+  const namingInputRef = useRef<HTMLInputElement | null>(null);
+
+  function insertNamingToken(token: string) {
+    const input = namingInputRef.current;
+    if (input) {
+      const start = input.selectionStart ?? s.namingPattern.length;
+      const end = input.selectionEnd ?? s.namingPattern.length;
+      const cur = s.namingPattern;
+      const next = cur.slice(0, start) + token + cur.slice(end);
+      s.setNamingPattern(next);
+      requestAnimationFrame(() => {
+        input.focus();
+        const pos = start + token.length;
+        input.setSelectionRange(pos, pos);
+      });
+    } else {
+      s.setNamingPattern(s.namingPattern + token);
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -138,6 +159,7 @@ export default function App() {
           path: f.path,
           duration: f.duration,
           trims: f.trims,
+          speedRange: f.speedRange,
           audio: f.audio,
           audioSource: f.audioSource,
           normalize: f.normalize,
@@ -150,6 +172,10 @@ export default function App() {
           overwrite: s.overwrite,
           encoder: engine.caps.advancedEncode ? s.encoder : null,
           extraArgs: s.extraArgs.trim() ? s.extraArgs.trim().split(/\s+/) : [],
+          lowPriority: s.lowCpuPriority,
+          stripMetadata: s.stripMetadata,
+          namingTemplate: s.namingPattern.trim() || undefined,
+          deleteSourceToTrash: s.deleteSourceToTrash,
         },
       );
     } catch (e) {
@@ -415,6 +441,87 @@ export default function App() {
                     />
                     <span className="text-xs text-slate-500">{t("extraArgsHint")}</span>
                   </label>
+                  <label className="flex flex-col gap-1 cursor-pointer">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={s.lowCpuPriority}
+                        disabled={s.converting}
+                        onChange={(e) => s.setLowCpuPriority(e.target.checked)}
+                        className="accent-emerald-500 rounded"
+                      />
+                      <span className="text-slate-300">{t("lowCpuPriorityLabel")}</span>
+                    </div>
+                    <span className="text-xs text-slate-500 pl-6">{t("lowCpuPriorityHint")}</span>
+                  </label>
+                  <label className="flex flex-col gap-1 cursor-pointer">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={s.stripMetadata}
+                        disabled={s.converting}
+                        onChange={(e) => s.setStripMetadata(e.target.checked)}
+                        className="accent-emerald-500 rounded"
+                      />
+                      <span className="text-slate-300">{t("stripMetadataLabel")}</span>
+                    </div>
+                    <span className="text-xs text-slate-500 pl-6">{t("stripMetadataHint")}</span>
+                  </label>
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300">{t("namingPatternLabel")}</span>
+                      <button
+                        type="button"
+                        onClick={() => s.setNamingPattern("{name}_whatsapp_{preset}{part}")}
+                        disabled={s.converting || s.namingPattern === "{name}_whatsapp_{preset}{part}"}
+                        className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-40 transition"
+                      >
+                        {t("resetPattern")}
+                      </button>
+                    </div>
+                    <input
+                      ref={namingInputRef}
+                      type="text"
+                      value={s.namingPattern}
+                      disabled={s.converting}
+                      onChange={(e) => s.setNamingPattern(e.target.value)}
+                      placeholder="{name}_whatsapp_{preset}{part}"
+                      className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
+                    />
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {NAMING_TOKENS.map((token) => (
+                        <button
+                          key={token}
+                          type="button"
+                          disabled={s.converting}
+                          onClick={() => insertNamingToken(token)}
+                          className="rounded bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-0.5 font-mono text-[11px] transition disabled:opacity-50"
+                        >
+                          {token}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-xs text-slate-500">{t("namingPatternHint")}</span>
+                  </div>
+                  <label className="flex flex-col gap-1 cursor-pointer">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={s.deleteSourceToTrash}
+                        disabled={s.converting}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setShowTrashConfirm(true);
+                          } else {
+                            s.setDeleteSourceToTrash(false);
+                          }
+                        }}
+                        className="accent-emerald-500 rounded"
+                      />
+                      <span className="text-slate-300">{t("deleteSourceLabel")}</span>
+                    </div>
+                    <span className="text-xs text-slate-500 pl-6">{t("deleteSourceHint")}</span>
+                  </label>
                   <div className="flex flex-col gap-2">
                     <span className="text-slate-300">{t("customPresets")}</span>
                     {s.customPresets.map((c) => (
@@ -613,6 +720,48 @@ export default function App() {
           </button>
         ))}
       </footer>
+      {showTrashConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setShowTrashConfirm(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-xl text-amber-400">⚠️</span>
+              <h3 className="text-base font-semibold text-slate-100">
+                {t("deleteSourceModalTitle")}
+              </h3>
+            </div>
+            <p className="mt-3 text-xs leading-relaxed text-slate-300">
+              {t("deleteSourceModalBody")}
+            </p>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowTrashConfirm(false)}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-white transition"
+              >
+                {t("cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  s.setDeleteSourceToTrash(true);
+                  setShowTrashConfirm(false);
+                }}
+                className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 shadow-sm transition"
+              >
+                {t("confirmEnable")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -146,6 +146,18 @@ const en = {
   copyAudioAll: "Copy Audio Settings to All",
   resetAllTrims: "Reset All Trims",
   audioCopiedToast: "Audio settings copied to all videos",
+  lowCpuPriorityLabel: "Low CPU Priority (keep PC responsive)",
+  lowCpuPriorityHint: "Runs FFmpeg at below-normal priority so background encoding doesn't slow down games or other apps.",
+  stripMetadataLabel: "Strip Metadata (-map_metadata -1)",
+  stripMetadataHint: "Removes location, device, and camera metadata from exported files.",
+  namingPatternLabel: "Custom output naming pattern",
+  namingPatternHint: "Tokens: {name}, {preset}, {part}, {resolution}, {date}",
+  resetPattern: "Reset",
+  deleteSourceLabel: "Move source video to Recycle Bin after conversion",
+  deleteSourceHint: "Source files are moved to Recycle Bin only after 100% successful conversion.",
+  deleteSourceModalTitle: "Move source files to Recycle Bin?",
+  deleteSourceModalBody: "Source videos will only be moved to the Recycle Bin after their conversion finishes with 100% success and verified output. Are you sure you want to enable this?",
+  confirmEnable: "Enable",
 };
 
 export type Key = keyof typeof en;
@@ -292,6 +304,18 @@ const id: Record<Key, string> = {
   copyAudioAll: "Salin Pengaturan Audio ke Semua",
   resetAllTrims: "Atur Ulang Semua Potongan",
   audioCopiedToast: "Pengaturan audio disalin ke semua video",
+  lowCpuPriorityLabel: "Prioritas CPU Rendah (jaga PC tetap responsif)",
+  lowCpuPriorityHint: "Menjalankan FFmpeg pada prioritas di bawah normal agar konversi latar belakang tidak memperlambat game atau aplikasi lain.",
+  stripMetadataLabel: "Hapus Metadata (-map_metadata -1)",
+  stripMetadataHint: "Menghapus metadata lokasi, perangkat, dan kamera dari file hasil ekspor.",
+  namingPatternLabel: "Pola penamaan hasil",
+  namingPatternHint: "Token: {name}, {preset}, {part}, {resolution}, {date}",
+  resetPattern: "Atur ulang",
+  deleteSourceLabel: "Pindahkan video sumber ke Keranjang Sampah setelah konversi",
+  deleteSourceHint: "File sumber hanya dipindahkan ke Keranjang Sampah setelah konversi berhasil 100%.",
+  deleteSourceModalTitle: "Pindahkan file sumber ke Keranjang Sampah?",
+  deleteSourceModalBody: "Video sumber hanya akan dipindahkan ke Keranjang Sampah setelah konversinya selesai dengan sukses 100% dan hasil terverifikasi. Anda yakin ingin mengaktifkannya?",
+  confirmEnable: "Aktifkan",
 };
 
 const dict: Record<Lang, Record<Key, string>> = { en, id };
