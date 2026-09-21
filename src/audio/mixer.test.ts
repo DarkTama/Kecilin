@@ -106,6 +106,22 @@ describe("AudioTrackMixer", () => {
     mixer.dispose();
   });
 
+  it("aborts loadTrack gracefully if mixer is disposed during fetch or decode", async () => {
+    vi.stubGlobal("window", {
+      AudioContext: vi.fn().mockImplementation(() => mockAudioContext),
+    });
+    const mixer = new AudioTrackMixer();
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => {
+      mixer.dispose();
+      return {
+        arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(16)),
+      };
+    }));
+
+    await mixer.loadTrack(0, "blob:track-0");
+    expect(mockAudioContext.createGain).not.toHaveBeenCalled();
+  });
+
   it("sets track volume and handles muted flag", async () => {
     vi.stubGlobal("window", {
       AudioContext: vi.fn().mockImplementation(() => mockAudioContext),
@@ -247,6 +263,7 @@ describe("AudioTrackMixer", () => {
     mixer.dispose();
     expect(activeSource.stop).toHaveBeenCalled();
     expect(activeSource.disconnect).toHaveBeenCalled();
+    expect(mockGainNode.disconnect).toHaveBeenCalled();
     expect(mockAudioContext.close).toHaveBeenCalled();
 
     // Calling play or setTrackVolume after dispose does nothing
@@ -254,14 +271,15 @@ describe("AudioTrackMixer", () => {
     expect(() => mixer.setTrackVolume(0, 0.5)).not.toThrow();
   });
 
-  it("handles stop error gracefully if source is already stopped", async () => {
+  it("handles stop error gracefully if source is already stopped and still disconnects", async () => {
+    const disconnectFn = vi.fn();
     mockAudioContext.createBufferSource = vi.fn().mockImplementation(() => {
       return {
         ...mockSourceNode,
         stop: vi.fn().mockImplementation(() => {
           throw new Error("InvalidStateError");
         }),
-        disconnect: vi.fn(),
+        disconnect: disconnectFn,
         start: vi.fn(),
       };
     });
@@ -277,8 +295,9 @@ describe("AudioTrackMixer", () => {
     await mixer.loadTrack(0, "blob:track-0");
     mixer.play(1);
 
-    // pause/dispose should not throw
+    // pause/dispose should not throw and disconnect should be called
     expect(() => mixer.pause()).not.toThrow();
+    expect(disconnectFn).toHaveBeenCalled();
     expect(() => mixer.dispose()).not.toThrow();
   });
 });

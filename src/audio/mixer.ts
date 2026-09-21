@@ -27,8 +27,11 @@ export class AudioTrackMixer {
   async loadTrack(index: number, url: string): Promise<void> {
     if (!this.ctx) return;
     const resp = await fetch(url);
+    if (!this.ctx) return;
     const ab = await resp.arrayBuffer();
+    if (!this.ctx) return;
     const audioBuffer = await this.ctx.decodeAudioData(ab);
+    if (!this.ctx) return;
     this.buffers.set(index, audioBuffer);
 
     if (!this.gainNodes.has(index)) {
@@ -86,9 +89,14 @@ export class AudioTrackMixer {
     for (const src of this.sources.values()) {
       try {
         src.stop();
-        src.disconnect();
       } catch {
         // ignore if already stopped
+      } finally {
+        try {
+          src.disconnect();
+        } catch {
+          // ignore disconnect errors
+        }
       }
     }
     this.sources.clear();
@@ -96,6 +104,13 @@ export class AudioTrackMixer {
 
   dispose(): void {
     this.stop();
+    for (const g of this.gainNodes.values()) {
+      try {
+        g.disconnect();
+      } catch {
+        // ignore
+      }
+    }
     this.gainNodes.clear();
     this.buffers.clear();
     if (this.ctx) {
