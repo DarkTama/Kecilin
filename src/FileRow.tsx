@@ -16,6 +16,8 @@ import {
 } from "./preview";
 import { resolvePreset, useStore } from "./store";
 import type { AudioOpt, FileState, SpeedRange, Trim } from "./store";
+import { AudioDrawer } from "./AudioDrawer";
+import { AudioTrackMixer } from "./audio/mixer";
 
 // Thumbnails are extracted one at a time — each is an ffmpeg spawn.
 let thumbQueue: Promise<void> = Promise.resolve();
@@ -242,7 +244,9 @@ function TrimEditor({
   const t = useT();
   const setTrims = useStore((st) => st.setTrims);
   const setAudio = useStore((st) => st.setAudio);
-  const setAudioSource = useStore((st) => st.setAudioSource);
+  const setTrackEnabled = useStore((st) => st.setTrackEnabled);
+  const setTrackVolume = useStore((st) => st.setTrackVolume);
+  const setTrackMuted = useStore((st) => st.setTrackMuted);
   const setNormalize = useStore((st) => st.setNormalize);
   const setSpeedRanges = useStore((st) => st.setSpeedRanges);
   const setTrimCustomName = useStore((st) => st.setTrimCustomName);
@@ -304,6 +308,116 @@ function TrimEditor({
   const [singleCustomName, setSingleCustomName] = useState<string>(
     file.trims[0]?.customName ?? "",
   );
+
+  const isMultiTrack = (file.audioTracksInfo?.length ?? file.audioTracks) > 1;
+  const enabledTrackCount = file.audioTracksInfo
+    ? file.audioTracksInfo.filter((t) => t.enabled).length
+    : 1;
+  const [audioDrawerOpen, setAudioDrawerOpen] = useState(false);
+  const mixerRef = useRef<AudioTrackMixer | null>(null);
+  const loadedTracks = useRef<Set<number>>(new Set());
+
+  const tracks = file.audioTracksInfo ?? [];
+
+  // Multi-track audio mixer initialization and cleanup
+  useEffect(() => {
+    if (!isMultiTrack) return;
+    if (!mixerRef.current) {
+      mixerRef.current = new AudioTrackMixer();
+    }
+    return () => {
+      mixerRef.current?.dispose();
+      mixerRef.current = null;
+      loadedTracks.current.clear();
+    };
+  }, [isMultiTrack, file.path]);
+
+  // Load tracks into mixer when drawer opens or tracks exist
+  useEffect(() => {
+    if (!isMultiTrack) return;
+    if (!mixerRef.current) {
+      mixerRef.current = new AudioTrackMixer();
+    }
+    const mixer = mixerRef.current;
+    let active = true;
+
+    async function loadTracks() {
+      for (const t of tracks) {
+        if (!active) return;
+        if (loadedTracks.current.has(t.index)) continue;
+        try {
+          const url = await engine.extractTrackAudio(file.path, t.index);
+          if (!active) return;
+          await mixer.loadTrack(t.index, url);
+          if (!active) return;
+          loadedTracks.current.add(t.index);
+          mixer.setTrackVolume(t.index, t.volume, t.muted || !t.enabled);
+          if (videoRef.current && !videoRef.current.paused) {
+            mixer.play(videoRef.current.currentTime);
+          }
+        } catch {
+          // ignore extraction errors
+        }
+      }
+    }
+
+    void loadTracks();
+
+    return () => {
+      active = false;
+    };
+  }, [isMultiTrack, file.path, tracks.length, audioDrawerOpen]);
+
+  // Sync mixer track volumes when track properties change
+  useEffect(() => {
+    if (!isMultiTrack || !mixerRef.current) return;
+    for (const t of tracks) {
+      mixerRef.current.setTrackVolume(t.index, t.volume, t.muted || !t.enabled);
+    }
+  }, [isMultiTrack, tracks]);
+
+  // Single-track volume state and handler
+  const singleTrackVol =
+    file.audioTracksInfo && file.audioTracksInfo.length > 0
+      ? file.audioTracksInfo[0].muted
+        ? 0
+        : Math.round(file.audioTracksInfo[0].volume * 100)
+      : file.audio === "mute"
+        ? 0
+        : file.audio === "keep"
+          ? 100
+          : Number(file.audio) || 100;
+
+  function handleSingleTrackVol(val: number) {
+    const volRatio = val / 100;
+    if (file.audioTracksInfo && file.audioTracksInfo.length > 0) {
+      setTrackVolume(file.path, 0, volRatio);
+      if (val === 0) {
+        setTrackMuted(file.path, 0, true);
+      } else if (file.audioTracksInfo[0].muted) {
+        setTrackMuted(file.path, 0, false);
+      }
+    }
+    if (val === 0) {
+      setAudio(file.path, "mute");
+    } else if (val === 100) {
+      setAudio(file.path, "keep");
+    } else if (val === 75 || val === 50 || val === 25) {
+      setAudio(file.path, String(val) as AudioOpt);
+    }
+  }
+
+  // Ensure video element volume/mute stays in sync for preview
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (isMultiTrack) {
+      v.muted = true;
+    } else {
+      v.muted = singleTrackVol === 0;
+      v.volume = Math.min(1, Math.max(0, singleTrackVol / 100));
+    }
+  }, [isMultiTrack, singleTrackVol, playhead]);
 
   // ---- Speed ramp (fast forward) state --------------------------------------
   // `ranges` below is the trim list; this is the list of fast-forward windows
@@ -553,6 +667,9 @@ function TrimEditor({
     const next = Math.max(0, Math.min(max, cur + step));
     v.currentTime = next;
     setPlayhead(next);
+    if (isMultiTrack) {
+      mixerRef.current?.seek(next);
+    }
   }
 
   const valid = end > start + 0.05;
@@ -665,7 +782,9 @@ function TrimEditor({
         if (el.playbackRate !== rate) el.playbackRate = rate;
         setLiveRate(rate);
         const mute =
-          userMuted || (previewMuted && shouldMutePreview(el.currentTime, liveRanges, true));
+          isMultiTrack ||
+          userMuted ||
+          (previewMuted && shouldMutePreview(el.currentTime, liveRanges, true));
         if (el.muted !== mute) el.muted = mute;
         // The `onTimeUpdate` auto-pause cannot see the trim end at high rates:
         // one tick advances 0.25 * rate seconds of media. Stop it here instead.
@@ -681,7 +800,7 @@ function TrimEditor({
       const el = videoRef.current;
       if (el) {
         el.playbackRate = 1;
-        el.muted = userMuted;
+        el.muted = isMultiTrack ? true : userMuted;
       }
       setLiveRate(1);
     };
@@ -719,7 +838,12 @@ function TrimEditor({
       return;
     }
     // Resume from where it paused/seeked; restart when outside the range.
-    if (v.currentTime < start || v.currentTime >= end - 0.05) v.currentTime = start;
+    if (v.currentTime < start || v.currentTime >= end - 0.05) {
+      v.currentTime = start;
+      if (isMultiTrack) {
+        mixerRef.current?.seek(start);
+      }
+    }
     v.play();
   }
 
@@ -744,12 +868,37 @@ function TrimEditor({
             key={src}
             ref={videoRef}
             src={src}
+            muted={isMultiTrack ? true : undefined}
             className="max-h-64 w-full rounded-lg bg-black"
             onError={() => void fallbackToProxy()}
-            onPlay={() => setPlaying(true)}
-            onPause={() => setPlaying(false)}
+            onPlay={() => {
+              setPlaying(true);
+              if (isMultiTrack) {
+                if (videoRef.current) videoRef.current.muted = true;
+                mixerRef.current?.play(videoRef.current?.currentTime ?? 0);
+              }
+            }}
+            onPause={() => {
+              setPlaying(false);
+              if (isMultiTrack) {
+                mixerRef.current?.pause();
+              }
+            }}
+            onSeeked={(e) => {
+              if (isMultiTrack) {
+                mixerRef.current?.seek(e.currentTarget.currentTime);
+              }
+            }}
+            onSeeking={(e) => {
+              if (isMultiTrack) {
+                mixerRef.current?.seek(e.currentTarget.currentTime);
+              }
+            }}
             onLoadedMetadata={(e) => {
               const v = e.currentTarget;
+              if (isMultiTrack) {
+                v.muted = true;
+              }
               if (Number.isFinite(v.duration)) {
                 setDuration((d) => d ?? v.duration);
                 if (end <= 0) update(start, v.duration);
@@ -760,6 +909,9 @@ function TrimEditor({
             }}
             onTimeUpdate={(e) => {
               const v = e.currentTarget;
+              if (isMultiTrack && !v.muted) {
+                v.muted = true;
+              }
               setPlayhead(v.currentTime);
               // Auto-pause when playback crosses the range end (but let seeks
               // beyond it play freely — "start from the middle" is allowed).
@@ -951,9 +1103,42 @@ function TrimEditor({
               v.currentTime = tt;
               setPlayhead(tt);
             }
+            if (isMultiTrack) {
+              mixerRef.current?.seek(tt);
+            }
           }}
           labels={[t("trimStart"), t("trimEnd")]}
           speedLabels={[t("speedStart"), t("speedEnd")]}
+        />
+      )}
+
+      {/* Expandable Multi-Track Audio Drawer */}
+      {isMultiTrack && audioDrawerOpen && (
+        <AudioDrawer
+          file={file}
+          playhead={showVideo ? playhead : null}
+          onTrackChange={(idx, patch) => {
+            if (patch.enabled !== undefined) {
+              setTrackEnabled(file.path, idx, patch.enabled);
+            }
+            if (patch.volume !== undefined) {
+              setTrackVolume(file.path, idx, patch.volume);
+            }
+            if (patch.muted !== undefined) {
+              setTrackMuted(file.path, idx, patch.muted);
+            }
+            if (mixerRef.current) {
+              const currentTrack = (file.audioTracksInfo ?? []).find((t) => t.index === idx);
+              const vol = patch.volume ?? currentTrack?.volume ?? 1;
+              const muted =
+                patch.muted !== undefined
+                  ? patch.muted
+                  : patch.enabled !== undefined
+                    ? !patch.enabled
+                    : currentTrack?.muted || !currentTrack?.enabled;
+              mixerRef.current.setTrackVolume(idx, vol, muted);
+            }
+          }}
         />
       )}
 
@@ -1231,42 +1416,35 @@ function TrimEditor({
             className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
           />
         </label>
-        {file.audioTracks > 1 && (
-          <label className="flex items-center gap-1.5 text-slate-300">
-            {t("source")}
-            <select
-              value={String(file.audioSource)}
-              onChange={(e) => {
-                const v = e.target.value;
-                setAudioSource(file.path, v === "default" || v === "merge" ? v : Number(v));
-              }}
-              title={t("sourceTitle")}
-              className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs"
+        {isMultiTrack ? (
+          <button
+            type="button"
+            onClick={() => setAudioDrawerOpen((o) => !o)}
+            className="px-2.5 py-1 rounded-md border border-emerald-700/60 bg-emerald-950/40 text-emerald-300 text-xs font-medium hover:bg-emerald-900/50 flex items-center gap-1"
+          >
+            🎚️ {t("audioTracks")} ({enabledTrackCount} {t("tracksSelected")})
+            <span className="text-[10px] font-mono">{audioDrawerOpen ? "▲" : "▼"}</span>
+          </button>
+        ) : (
+          <label className="flex items-center gap-1.5 text-xs text-slate-300">
+            <span>Vol:</span>
+            <input
+              type="range"
+              min="0"
+              max="200"
+              value={singleTrackVol}
+              onChange={(e) => handleSingleTrackVol(Number(e.target.value))}
+              className="w-20 h-1 bg-slate-800 rounded accent-emerald-500"
+            />
+            <span
+              className={`font-mono w-9 ${
+                singleTrackVol > 100 ? "text-amber-400 font-bold" : "text-emerald-400"
+              }`}
             >
-              <option value="default">{t("trackDefault")}</option>
-              {Array.from({ length: file.audioTracks - 1 }, (_, i) => (
-                <option key={i + 1} value={i + 1}>
-                  {t("trackN", { n: i + 2 })}
-                </option>
-              ))}
-              <option value="merge">{t("mergeAll")}</option>
-            </select>
+              {singleTrackVol}%
+            </span>
           </label>
         )}
-        <label className="flex items-center gap-1.5 text-slate-300">
-          {t("audio")}
-          <select
-            value={file.audio}
-            onChange={(e) => setAudio(file.path, e.target.value as AudioOpt)}
-            className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs"
-          >
-            <option value="keep">{t("keep")}</option>
-            <option value="75">75%</option>
-            <option value="50">50%</option>
-            <option value="25">25%</option>
-            <option value="mute">{t("mute")}</option>
-          </select>
-        </label>
         <label className="flex items-center gap-1.5 text-slate-300 text-xs" title={t("normalizeTitle")}>
           <input
             type="checkbox"
