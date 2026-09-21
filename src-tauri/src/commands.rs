@@ -302,9 +302,9 @@ pub(crate) fn parse_audio_tracks_info(stderr: &str) -> Vec<AudioTrackMeta> {
     let mut current_idx = None;
     let mut current_title: Option<String> = None;
 
-    let flush_track = |tracks: &mut Vec<AudioTrackMeta>, idx: Option<usize>, title: Option<String>| {
-        if let Some(i) = idx {
-            let name = title.unwrap_or_else(|| format!("Track {}", i + 1));
+    let flush_track = |tracks: &mut Vec<AudioTrackMeta>, idx: &mut Option<usize>, title: &mut Option<String>| {
+        if let Some(i) = idx.take() {
+            let name = title.take().unwrap_or_else(|| format!("Track {}", i + 1));
             tracks.push(AudioTrackMeta {
                 index: i,
                 name,
@@ -318,21 +318,27 @@ pub(crate) fn parse_audio_tracks_info(stderr: &str) -> Vec<AudioTrackMeta> {
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
-        if line.contains("Stream #") && line.contains("Audio:") {
-            flush_track(&mut tracks, current_idx, current_title);
-            current_idx = Some(tracks.len());
-            current_title = None;
-        } else if current_idx.is_some() && line.trim().starts_with("title") && line.contains(':') {
+        if line.contains("Stream #") {
+            flush_track(&mut tracks, &mut current_idx, &mut current_title);
+            if line.contains("Audio:") {
+                current_idx = Some(tracks.len());
+            }
+        } else if line.contains("Chapter #") || (!line.starts_with(' ') && !line.starts_with('\t') && !line.trim().is_empty()) {
+            flush_track(&mut tracks, &mut current_idx, &mut current_title);
+        } else if current_idx.is_some() && line.contains(':') {
             if let Some(pos) = line.find(':') {
-                let t = line[pos + 1..].trim().to_string();
-                if !t.is_empty() {
-                    current_title = Some(t);
+                let key = line[..pos].trim();
+                if key.eq_ignore_ascii_case("title") {
+                    let t = line[pos + 1..].trim().to_string();
+                    if !t.is_empty() {
+                        current_title = Some(t);
+                    }
                 }
             }
         }
         i += 1;
     }
-    flush_track(&mut tracks, current_idx, current_title);
+    flush_track(&mut tracks, &mut current_idx, &mut current_title);
 
     if tracks.len() == 1 {
         tracks[0].enabled = true;
@@ -2171,6 +2177,29 @@ Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'obs.mp4':
         assert!(tracks[0].enabled);
         assert_eq!(tracks[1].name, "Track 2");
         assert!(!tracks[1].enabled);
+    }
+
+    #[test]
+    fn parses_audio_track_not_overwritten_by_subsequent_subtitle_or_chapter() {
+        let stderr = r#"
+Input #0, matroska,webm, from 'movie.mkv':
+  Duration: 00:05:00.00, start: 0.000000, bitrate: 4000 kb/s
+  Stream #0:0: Video: h264 (High)
+  Stream #0:1: Audio: aac, 48000 Hz, stereo
+    Metadata:
+      title           : English Audio
+  Stream #0:2: Subtitle: subrip
+    Metadata:
+      title           : Commentary Subtitles
+  Chapter #0:0: start 0.000000, end 10.000000
+    Metadata:
+      title           : Chapter 1
+"#;
+        let tracks = parse_audio_tracks_info(stderr);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].index, 0);
+        assert_eq!(tracks[0].name, "English Audio");
+        assert!(tracks[0].enabled);
     }
 
     #[test]
