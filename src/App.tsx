@@ -185,6 +185,7 @@ export default function App() {
           audioSource: f.audioSource,
           normalize: f.normalize,
           audioTracks: f.audioTracks,
+          audioTracksInfo: f.audioTracksInfo,
         })),
         {
           preset: resolvePreset(s.preset, s.customPresets),

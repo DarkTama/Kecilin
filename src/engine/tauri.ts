@@ -97,6 +97,12 @@ export const tauriEngine: Engine = {
         audioSource: f.audioSource === "default" ? null : String(f.audioSource),
         normalize: f.normalize,
         audioTracks: f.audioTracks,
+        audioTracksInfo: f.audioTracksInfo?.map((t) => ({
+          index: t.index,
+          name: t.name,
+          enabled: t.enabled && !t.muted,
+          volume: t.muted ? 0 : t.volume,
+        })) ?? [],
       })),
       options: {
         preset: options.preset,
@@ -152,5 +158,9 @@ export const tauriEngine: Engine = {
   prepareThumbnail: async (path, duration): Promise<Thumb> => {
     const p = await invoke<string>("prepare_thumbnail", { path, duration });
     return { url: convertFileSrc(p), iconPath: p };
+  },
+  extractTrackAudio: async (path, index) => {
+    const p = await invoke<string>("extract_track_audio", { path, index });
+    return convertFileSrc(p);
   },
 };

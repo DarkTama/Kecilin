@@ -5,6 +5,7 @@ import type {
   Overwrite,
   PresetSpec,
   Summary,
+  TrackInfo,
   VideoFile,
 } from "../store";
 
@@ -34,6 +35,7 @@ export type BatchItemSpec = {
   audioSource: AudioSource;
   normalize: boolean;
   audioTracks: number;
+  audioTracksInfo?: TrackInfo[];
 };
 
 export type BatchItem = BatchItemSpec;
@@ -117,4 +119,5 @@ export interface Engine {
   preparePreviewProxy(path: string, onProgress?: (percent: number) => void): Promise<string>;
   cancelPreviewProxy?(path: string): Promise<void>;
   prepareThumbnail(path: string, duration: number | null): Promise<Thumb>;
+  extractTrackAudio(path: string, index: number): Promise<string>;
 }

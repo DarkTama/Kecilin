@@ -72,6 +72,14 @@ export function maxrateKbps(spec: PresetSpec): number {
   return Number.parseInt(spec.maxrate, 10) || 0;
 }
 
+export type TrackInfo = {
+  index: number;
+  name: string;
+  enabled: boolean;
+  volume: number; // 0.0 to 2.0
+  muted: boolean;
+};
+
 /** What `scan_directory`/`scan_files` return per file. */
 export type VideoFile = {
   path: string;
@@ -79,6 +87,7 @@ export type VideoFile = {
   size: number;
   duration: number | null;
   audioTracks: number;
+  audioTracksInfo?: TrackInfo[];
 };
 
 export type FileState = VideoFile & {
@@ -136,6 +145,9 @@ export type StoreState = {
   setAudio: (path: string, audio: AudioOpt) => void;
   setAudioSource: (path: string, audioSource: AudioSource) => void;
   setNormalize: (path: string, normalize: boolean) => void;
+  setTrackEnabled: (path: string, index: number, enabled: boolean) => void;
+  setTrackVolume: (path: string, index: number, volume: number) => void;
+  setTrackMuted: (path: string, index: number, muted: boolean) => void;
   setLang: (lang: Lang) => void;
   setRecursive: (recursive: boolean) => void;
   setParallel: (parallel: number) => void;
@@ -174,6 +186,10 @@ export type Store = StoreState;
 
 const fresh = (f: VideoFile): FileState => ({
   ...f,
+  audioTracksInfo: f.audioTracksInfo?.map((t) => ({
+    ...t,
+    muted: t.muted ?? false,
+  })),
   trims: [],
   speedRanges: [],
   audio: "keep",
@@ -237,6 +253,45 @@ export const useStore = create<Store>()(
         set((s) => ({ files: s.files.map((f) => (f.path === path ? { ...f, audioSource } : f)) })),
       setNormalize: (path, normalize) =>
         set((s) => ({ files: s.files.map((f) => (f.path === path ? { ...f, normalize } : f)) })),
+      setTrackEnabled: (path, index, enabled) =>
+        set((state) => ({
+          files: state.files.map((f) =>
+            f.path === path
+              ? {
+                  ...f,
+                  audioTracksInfo: (f.audioTracksInfo ?? []).map((t) =>
+                    t.index === index ? { ...t, enabled } : t
+                  ),
+                }
+              : f
+          ),
+        })),
+      setTrackVolume: (path, index, volume) =>
+        set((state) => ({
+          files: state.files.map((f) =>
+            f.path === path
+              ? {
+                  ...f,
+                  audioTracksInfo: (f.audioTracksInfo ?? []).map((t) =>
+                    t.index === index ? { ...t, volume } : t
+                  ),
+                }
+              : f
+          ),
+        })),
+      setTrackMuted: (path, index, muted) =>
+        set((state) => ({
+          files: state.files.map((f) =>
+            f.path === path
+              ? {
+                  ...f,
+                  audioTracksInfo: (f.audioTracksInfo ?? []).map((t) =>
+                    t.index === index ? { ...t, muted } : t
+                  ),
+                }
+              : f
+          ),
+        })),
 
       setLang: (lang) => set({ lang }),
       setRecursive: (recursive) => set({ recursive }),
