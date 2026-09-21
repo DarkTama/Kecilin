@@ -16,17 +16,19 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Tag = "autobuild-2026-08-23-13-03",
-    [string]$Asset = "ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip",
+    [string]$Tag = "autobuild-2026-08-31-13-27",
+    [string]$Asset = "ffmpeg-n8.1.2-50-g1a748fe2cd-win64-gpl-8.1.zip",
     [string]$ExpectedSha256 = "",
     [switch]$Force
 )
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Known-good SHA-256 hashes for pinned assets (verified at authoring time).
 $KnownSha256 = @{
     "ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip" = "40D98AEF3E8D48665C4DBBDD0093D6E50C61D71A3A48067E9D3EDD9FB3A1F3CA"
+    "ffmpeg-n8.1.2-50-g1a748fe2cd-win64-gpl-8.1.zip" = "273ABB45F3F9F76C303E35FF39F5BB6C23C163AE65F6244A32B7D4A7F6CF0616"
 }
 if (-not $ExpectedSha256 -and $KnownSha256.ContainsKey($Asset) -and $KnownSha256[$Asset]) {
     $ExpectedSha256 = $KnownSha256[$Asset]
@@ -58,22 +60,48 @@ $tmp  = Join-Path ([System.IO.Path]::GetTempPath()) "kecilin-ffmpeg"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $zip = Join-Path $tmp $Asset
 
-Write-Host "Downloading $base/$Asset ..."
-Invoke-WebRequest -Uri "$base/$Asset" -OutFile $zip
+try {
+    Write-Host "Downloading $base/$Asset ..."
+    Invoke-WebRequest -Uri "$base/$Asset" -OutFile $zip -UseBasicParsing
+} catch {
+    Write-Warning "Failed to download $base/$Asset : $_"
+    Write-Host "Trying fallback to BtbN latest..."
+    try {
+        $Tag = "latest"
+        $Asset = "ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
+        $base = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$Tag"
+        $zip = Join-Path $tmp $Asset
+        $ExpectedSha256 = ""
+        Invoke-WebRequest -Uri "$base/$Asset" -OutFile $zip -UseBasicParsing
+    } catch {
+        Write-Warning "Failed to download fallback from BtbN latest: $_"
+        Write-Host "Trying fallback to Kecilin v0.8.1 release..."
+        $Tag = "v0.8.1"
+        $Asset = "Kecilin-0.8.1-portable-win64.zip"
+        $base = "https://github.com/DarkTama/Kecilin/releases/download/$Tag"
+        $zip = Join-Path $tmp $Asset
+        $ExpectedSha256 = ""
+        Invoke-WebRequest -Uri "$base/$Asset" -OutFile $zip -UseBasicParsing
+    }
+}
 
 # --- Integrity check ---
 if (-not $ExpectedSha256) {
-    try {
-        $sums = (Invoke-WebRequest -Uri "$base/checksums.sha256" -UseBasicParsing).Content
-        # PS 5.1 may hand back bytes for this content type.
-        if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
-        foreach ($line in ($sums -split "`n")) {
-            if ($line -match "([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($Asset))") {
-                $ExpectedSha256 = $Matches[1]; break
+    if ($KnownSha256.ContainsKey($Asset) -and $KnownSha256[$Asset]) {
+        $ExpectedSha256 = $KnownSha256[$Asset]
+    } else {
+        try {
+            $sums = (Invoke-WebRequest -Uri "$base/checksums.sha256" -UseBasicParsing).Content
+            # PS 5.1 may hand back bytes for this content type.
+            if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
+            foreach ($line in ($sums -split "`n")) {
+                if ($line.Trim() -match "([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($Asset))$") {
+                    $ExpectedSha256 = $Matches[1]; break
+                }
             }
+        } catch {
+            Write-Warning "Could not fetch checksums.sha256; skipping integrity check."
         }
-    } catch {
-        Write-Warning "Could not fetch checksums.sha256; skipping integrity check."
     }
 }
 # Compute SHA-256 via .NET (Get-FileHash is unavailable on some CI PowerShell hosts).
