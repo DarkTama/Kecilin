@@ -152,15 +152,23 @@ impl BatchState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioTrackMeta {
+    pub index: usize,
+    pub name: String,
+    pub enabled: bool,
+    pub volume: f32,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoFile {
-    path: String,
-    name: String,
-    size: u64,
-    duration: Option<f64>,
-    /// Number of audio streams (OBS multi-track recordings have several).
-    audio_tracks: usize,
+    pub path: String,
+    pub name: String,
+    pub size: u64,
+    pub duration: Option<f64>,
+    pub audio_tracks: usize,
+    pub audio_tracks_info: Vec<AudioTrackMeta>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -287,6 +295,75 @@ pub(crate) fn parse_audio_tracks(stderr: &str) -> usize {
         .lines()
         .filter(|l| l.contains("Stream #") && l.contains("Audio:"))
         .count()
+}
+
+pub(crate) fn parse_audio_tracks_info(stderr: &str) -> Vec<AudioTrackMeta> {
+    let mut tracks = Vec::new();
+    let mut current_idx = None;
+    let mut current_title: Option<String> = None;
+
+    let flush_track = |tracks: &mut Vec<AudioTrackMeta>, idx: Option<usize>, title: Option<String>| {
+        if let Some(i) = idx {
+            let name = title.unwrap_or_else(|| format!("Track {}", i + 1));
+            tracks.push(AudioTrackMeta {
+                index: i,
+                name,
+                enabled: false,
+                volume: 1.0,
+            });
+        }
+    };
+
+    let lines: Vec<&str> = stderr.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.contains("Stream #") && line.contains("Audio:") {
+            flush_track(&mut tracks, current_idx, current_title);
+            current_idx = Some(tracks.len());
+            current_title = None;
+        } else if current_idx.is_some() && line.trim().starts_with("title") && line.contains(':') {
+            if let Some(pos) = line.find(':') {
+                let t = line[pos + 1..].trim().to_string();
+                if !t.is_empty() {
+                    current_title = Some(t);
+                }
+            }
+        }
+        i += 1;
+    }
+    flush_track(&mut tracks, current_idx, current_title);
+
+    if tracks.len() == 1 {
+        tracks[0].enabled = true;
+    } else if tracks.len() > 1 {
+        let has_master = tracks.iter().any(|t| {
+            let l = t.name.to_lowercase();
+            l.contains("master") || l.contains("all audio")
+        });
+        if has_master {
+            for t in tracks.iter_mut() {
+                let l = t.name.to_lowercase();
+                if l.contains("master") || l.contains("all audio") {
+                    t.enabled = true;
+                    break;
+                }
+            }
+        } else {
+            // Enable recognized primary sources (Desktop/Game and Mic/Aux) or Track 0 & 1
+            for t in tracks.iter_mut() {
+                let l = t.name.to_lowercase();
+                if l.contains("desktop") || l.contains("game") || l.contains("mic") || l.contains("aux") {
+                    t.enabled = true;
+                }
+            }
+            if !tracks.iter().any(|t| t.enabled) {
+                tracks[0].enabled = true;
+            }
+        }
+    }
+
+    tracks
 }
 
 /// Parse the primary video and audio codecs from ffmpeg stderr header.
@@ -835,15 +912,24 @@ async fn probe_files(
     let mut files = Vec::with_capacity(found.len());
     for (p, name, size) in found {
         let path_str = p.to_str().unwrap().to_string(); // UTF-8 checked by callers
-        let (duration, audio_tracks) =
+        let (duration, audio_tracks, audio_tracks_info) =
             match ffmpeg(app)?.args(["-hide_banner", "-i", &path_str]).output().await {
                 Ok(out) => {
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    (parse_duration_secs(&stderr), parse_audio_tracks(&stderr))
+                    let info = parse_audio_tracks_info(&stderr);
+                    let count = info.len();
+                    (parse_duration_secs(&stderr), count, info)
                 }
-                Err(_) => (None, 0),
+                Err(_) => (None, 0, Vec::new()),
             };
-        files.push(VideoFile { path: path_str, name, size, duration, audio_tracks });
+        files.push(VideoFile {
+            path: path_str,
+            name,
+            size,
+            duration,
+            audio_tracks,
+            audio_tracks_info,
+        });
     }
     Ok(files)
 }
@@ -2042,6 +2128,49 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
         assert_eq!(parse_audio_tracks(stderr), 2);
         assert_eq!(parse_audio_tracks("Stream #0:0: Video: h264"), 0);
         assert_eq!(parse_audio_tracks(""), 0);
+    }
+
+    #[test]
+    fn parses_audio_track_titles_from_ffmpeg_header() {
+        let stderr = r#"
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'obs.mp4':
+  Duration: 00:01:30.00, start: 0.000000, bitrate: 12000 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High)
+  Stream #0:1[0x2](und): Audio: aac (LC), 48000 Hz, stereo, fltp, 320 kb/s (default)
+    Metadata:
+      title           : Desktop Audio
+  Stream #0:2[0x3](und): Audio: aac (LC), 48000 Hz, stereo, fltp, 320 kb/s
+    Metadata:
+      title           : Mic / Auxiliary
+  Stream #0:3[0x4](und): Audio: aac (LC), 48000 Hz, stereo, fltp, 320 kb/s
+    Metadata:
+      title           : Discord
+"#;
+        let tracks = parse_audio_tracks_info(stderr);
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].index, 0);
+        assert_eq!(tracks[0].name, "Desktop Audio");
+        assert!(tracks[0].enabled);
+        assert_eq!(tracks[1].index, 1);
+        assert_eq!(tracks[1].name, "Mic / Auxiliary");
+        assert!(tracks[1].enabled);
+        assert_eq!(tracks[2].index, 2);
+        assert_eq!(tracks[2].name, "Discord");
+        assert!(!tracks[2].enabled);
+    }
+
+    #[test]
+    fn parses_audio_tracks_fallback_without_metadata() {
+        let stderr = r#"
+  Stream #0:1: Audio: aac, 48000 Hz, stereo
+  Stream #0:2: Audio: aac, 48000 Hz, stereo
+"#;
+        let tracks = parse_audio_tracks_info(stderr);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].name, "Track 1");
+        assert!(tracks[0].enabled);
+        assert_eq!(tracks[1].name, "Track 2");
+        assert!(!tracks[1].enabled);
     }
 
     #[test]
