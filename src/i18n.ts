@@ -144,6 +144,35 @@ const en = {
   removeFastForward: "Remove this fast forward",
   previewAudioOn: "Preview audio on — mute the sped-up parts",
   previewAudioMuted: "Sped-up parts muted in preview (still in the output)",
+  helpTitle: "How the editor works",
+  helpTrimTitle: "Trimming",
+  helpTrimBody:
+    "The green handles on top of the timeline set which part of the video is kept. Everything outside them is cut. Add more parts to split one video into several files.",
+  helpLegendTrim: "kept part",
+  helpLegendSpeed: "fast forward",
+  helpLegendPlayhead: "playhead",
+  helpFfTitle: "Fast forward",
+  helpFfBody:
+    "Fast forward speeds up a slice of the kept part while the rest plays at normal speed — handy for a long walk in the middle of a clip. The amber handles below the timeline mark where it starts and ends.",
+  helpFfModes:
+    "Speed multiplier: you pick the speed. Fit Target Duration: you say how long the result should be and the speed is worked out for you.",
+  helpFfMulti:
+    "Add fast forward drops another pair of amber handles, with its own speed. Ranges are numbered on the timeline; click one to edit it.",
+  helpFfOverlap:
+    "Ranges cannot overlap or leave the trimmed part — a handle stops when it meets its neighbour.",
+  helpPreviewTitle: "Preview and result",
+  helpPreviewBody:
+    "Press play and the preview really does speed up inside a fast-forward range, with a badge showing the rate in use.",
+  helpPreviewStrip:
+    "The Result preview strip under the timeline is drawn to scale: amber parts are the sped-up ones, and they shrink as the speed goes up.",
+  helpPreviewCap:
+    "Playback can only preview up to 16x, but the converted file goes up to 30x. Above 16x the badge says the preview is capped.",
+  helpPreviewAudio:
+    "Sped-up audio is kept in the converted file. The speaker button only silences it while you are previewing.",
+  helpKeysTitle: "Shortcuts",
+  helpKeysSpace: "Space — play or pause the preview.",
+  helpKeysArrows: "Arrow keys on a handle — nudge it. Hold Shift for a bigger step.",
+  helpKeysEsc: "Esc — close this panel.",
   timeSaved: "Saves {t}",
   autoSplitBtn: "⚡ Auto-Split into {len} Parts",
   outputFilenamePlaceholder: "Output filename",
@@ -311,6 +340,35 @@ const id: Record<Key, string> = {
   removeFastForward: "Hapus percepat ini",
   previewAudioOn: "Audio pratinjau aktif — bisukan bagian cepat",
   previewAudioMuted: "Bagian cepat dibisukan di pratinjau (tetap ada di hasil)",
+  helpTitle: "Cara kerja editor",
+  helpTrimTitle: "Memotong",
+  helpTrimBody:
+    "Pegangan hijau di atas linimasa menentukan bagian video yang disimpan. Semua di luarnya dibuang. Tambah bagian untuk memecah satu video jadi beberapa berkas.",
+  helpLegendTrim: "bagian disimpan",
+  helpLegendSpeed: "percepat",
+  helpLegendPlayhead: "posisi putar",
+  helpFfTitle: "Percepat",
+  helpFfBody:
+    "Percepat mempercepat sepotong bagian yang disimpan, sisanya tetap kecepatan normal — berguna untuk perjalanan panjang di tengah klip. Pegangan kuning di bawah linimasa menandai awal dan akhirnya.",
+  helpFfModes:
+    "Pengali kecepatan: Anda pilih kecepatannya. Sesuaikan Durasi Target: Anda sebut durasi hasilnya, kecepatannya dihitungkan.",
+  helpFfMulti:
+    "Tambah percepat menaruh sepasang pegangan kuning baru dengan kecepatannya sendiri. Rentang diberi nomor di linimasa; klik salah satu untuk menyuntingnya.",
+  helpFfOverlap:
+    "Rentang tidak boleh bertumpang tindih atau keluar dari bagian yang dipotong — pegangan berhenti saat bertemu tetangganya.",
+  helpPreviewTitle: "Pratinjau dan hasil",
+  helpPreviewBody:
+    "Tekan putar dan pratinjau benar-benar mempercepat di dalam rentang percepat, dengan lencana yang menunjukkan kecepatan yang dipakai.",
+  helpPreviewStrip:
+    "Bilah Pratinjau hasil di bawah linimasa digambar sesuai skala: bagian kuning adalah yang dipercepat, dan menyusut saat kecepatan dinaikkan.",
+  helpPreviewCap:
+    "Pemutaran hanya bisa mempratinjau sampai 16x, tapi berkas hasil sampai 30x. Di atas 16x lencana memberi tahu pratinjau dibatasi.",
+  helpPreviewAudio:
+    "Audio yang dipercepat tetap ada di berkas hasil. Tombol pengeras suara hanya membisukannya saat Anda melihat pratinjau.",
+  helpKeysTitle: "Pintasan",
+  helpKeysSpace: "Spasi — putar atau jeda pratinjau.",
+  helpKeysArrows: "Tombol panah pada pegangan — geser sedikit. Tahan Shift untuk langkah lebih besar.",
+  helpKeysEsc: "Esc — tutup panel ini.",
   timeSaved: "Hemat {t}",
   autoSplitBtn: "⚡ Bagi Otomatis ke Bagian {len}",
   outputFilenamePlaceholder: "Nama file hasil",

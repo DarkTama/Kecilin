@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { FileRow } from "./FileRow";
+import { HelpPanel } from "./HelpPanel";
 import { engine, IS_WEB } from "./engine";
 import { slug } from "./engine/args";
 import { fmtSize } from "./format";
@@ -39,6 +40,7 @@ export default function App() {
   const [version, setVersion] = useState("");
   const [encoders, setEncoders] = useState<string[]>([]);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [draft, setDraft] = useState({ name: "", height: 1080, crf: 20, maxrateKbps: 6000, level: "4.2" });
   const [audioCopiedToast, setAudioCopiedToast] = useState(false);
@@ -255,6 +257,7 @@ export default function App() {
 
   return (
     <div className="flex min-h-screen flex-col">
+      {helpOpen && <HelpPanel onClose={() => setHelpOpen(false)} />}
       <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 px-6 py-8">
         <header className="flex items-baseline justify-between">
           <div>
@@ -263,6 +266,15 @@ export default function App() {
             </h1>
             <p className="text-sm text-slate-400">{t("tagline")}</p>
           </div>
+          <button
+            onClick={() => setHelpOpen(true)}
+            title={t("helpTitle")}
+            aria-label={t("helpTitle")}
+            className="ml-3 flex h-6 w-6 shrink-0 items-center justify-center self-center rounded-full border border-slate-700 text-xs font-semibold text-slate-400 hover:border-emerald-500 hover:text-emerald-400"
+          >
+            ?
+          </button>
+          <div className="flex-1" />
           {hasQueue && !s.converting && (
             <div className="flex gap-4 text-sm">
               <button onClick={pickFiles} disabled={scanning} className="text-emerald-400 hover:text-emerald-300">

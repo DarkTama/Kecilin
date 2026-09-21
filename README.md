@@ -16,11 +16,12 @@
   | 720p | 20 | 4200k | better quality, gameplay |
 
 - **Trim with two drag handles — into as many parts as you like** — per file, optional, and frame-accurate (the app re-encodes anyway, so no keyframe snapping). Add multiple ranges to split one video into `_part1`, `_part2`, … files. The preview has play/pause and a live playhead marker.
+- **Fast forward the boring middle** — mark any stretch inside a trim and speed it up, either by picking a multiplier or by naming the duration you want and letting the app solve for the speed. Add as many fast-forward ranges as you like, each with its own speed. The preview really does speed up as it plays, and a to-scale strip shows what the finished clip will look like before you convert.
 - **Previews that always work** — every row gets a thumbnail, and if Windows can't decode a format (HEVC without the codec extension, `.mkv`, `.avi`), the bundled ffmpeg quietly builds a small preview proxy instead. Nothing to install.
 - **Files or folders, output anywhere** — add individual videos via picker or drag-and-drop alongside folder scans, remove them with a click, and optionally redirect all output to a folder of your choice.
 - **From result to WhatsApp in one motion** — done rows show the size saved, reveal in Explorer, copy to clipboard for Ctrl+V, or just drag the thumbnail straight into a chat. A toast fires when a batch finishes in the background.
 - **Guided choices** — each preset shows a worst-case size estimate for your queue, audio can be muted or turned down per file, and 30-second "Status mode" stamps fixed-length parts.
-- **Grows with you** — an Advanced panel (parallel conversions, overwrite policy, custom presets, GPU encoders, extra ffmpeg flags) stays out of the way until you want it; skip a file mid-batch; an ETA on the progress bar; in-app updates; and a Bahasa Indonesia UI toggle.
+- **Grows with you** — an Advanced panel (parallel conversions, overwrite policy, custom presets, GPU encoders, extra ffmpeg flags) stays out of the way until you want it; a `?` in the header explains the whole editor in plain words; skip a file mid-batch; an ETA on the progress bar; in-app updates; and a Bahasa Indonesia UI toggle.
 - **Multi-track audio, handled** — OBS-style recordings with separate game/mic tracks get a per-file source picker (any track, or merge them all), plus one-toggle loudness normalization.
 - **Real progress bars** — per file and per batch; a failed file is marked and the batch keeps going.
 - **Self-contained** — ffmpeg ships inside as a Tauri sidecar; nothing to install.
