@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kecilin - Multi-Track Audio Drawer Mockup</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    input[type=range] { accent-color: #10b981; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 p-6 flex flex-col items-center min-h-screen">
+
+  <div class="w-full max-w-4xl space-y-6">
+    <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+      <div>
+        <h1 class="text-xl font-bold text-emerald-400">Kecilin · Multi-Track Audio & Waveform Mockup</h1>
+        <p class="text-xs text-slate-400 mt-1">Review Proposed Designs for Audio Drawer, Per-Track Waveform, and Volume Boost</p>
+      </div>
+      <div class="flex gap-2">
+        <button id="btnLayoutA" onclick="setLayout('A')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white">Layout 1: Timeline-Aligned Lanes</button>
+        <button id="btnLayoutB" onclick="setLayout('B')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">Layout 2: Compact Split Card</button>
+      </div>
+    </div>
+
+    <!-- Trim Editor Container (matching Kecilin UI) -->
+    <div class="rounded-xl border border-slate-800 bg-slate-900/90 p-5 shadow-2xl space-y-4">
+
+      <!-- Video Preview Area -->
+      <div class="relative w-full h-56 bg-black rounded-lg overflow-hidden flex items-center justify-center border border-slate-800">
+        <div class="text-center">
+          <div class="text-4xl mb-2">🎬</div>
+          <span class="text-xs text-slate-400">Video Preview Frame (0:42.0 / 0:50.2)</span>
+        </div>
+        <div class="absolute bottom-2 left-2 bg-slate-950/80 px-2 py-0.5 rounded text-[11px] font-mono text-emerald-400">
+          🔊 Live Mix: Track 1 (100%) + Track 2 (140%)
+        </div>
+      </div>
+
+      <!-- Main Range Timeline Scrubber -->
+      <div class="space-y-1.5 pt-1">
+        <div class="flex justify-between text-xs text-slate-400 font-mono">
+          <span>0:00.0</span>
+          <span class="text-emerald-400 font-semibold">Playhead: 0:42.0</span>
+          <span>0:50.2</span>
+        </div>
+
+        <!-- Master Scrubber Bar -->
+        <div class="relative h-6 bg-slate-950 rounded-lg border border-slate-800 overflow-hidden cursor-pointer">
+          <!-- Selected Trim Range -->
+          <div class="absolute inset-y-0 left-[0%] right-[0%] bg-emerald-500/25 border-x-4 border-emerald-500"></div>
+          <!-- Playhead indicator -->
+          <div class="absolute top-0 bottom-0 left-[83%] w-0.5 bg-cyan-400 shadow-[0_0_8px_#22d3ee]"></div>
+        </div>
+      </div>
+
+      <!-- ================= LAYOUT 1: Stacked Timeline-Aligned Waveform Lanes ================= -->
+      <div id="layoutA" class="space-y-3 pt-2">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-semibold uppercase tracking-wider text-slate-300">Audio Tracks (4 detected)</span>
+            <span class="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded">OBS Studio Recording</span>
+          </div>
+          <span class="text-xs text-slate-400">Waveforms align with timeline above</span>
+        </div>
+
+        <!-- Track 1 Lane -->
+        <div class="rounded-lg border border-slate-800 bg-slate-950/80 p-3 space-y-2">
+          <div class="flex items-center justify-between text-xs">
+            <label class="flex items-center gap-2 cursor-pointer font-medium text-slate-200">
+              <input type="checkbox" checked class="accent-emerald-500 h-4 w-4 rounded">
+              <span class="font-semibold text-emerald-400">Track 1:</span> Desktop Audio
+            </label>
+            <div class="flex items-center gap-3">
+              <div class="flex items-center gap-2 font-mono text-[11px] text-slate-300">
+                <span>Vol:</span>
+                <input type="range" min="0" max="200" value="100" class="w-24 h-1.5 bg-slate-800 rounded-lg cursor-pointer" oninput="document.getElementById('vol1').innerText = this.value + '%'">
+                <span id="vol1" class="w-10 text-right text-emerald-400">100%</span>
+              </div>
+              <button class="px-2 py-0.5 rounded text-[11px] border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300">Mute</button>
+            </div>
+          </div>
+          <!-- Waveform Display Canvas / SVG -->
+          <div class="relative h-10 w-full bg-slate-900 rounded border border-slate-800/80 overflow-hidden flex items-center px-1">
+            <svg class="w-full h-8 text-emerald-500/70" viewBox="0 0 500 40" preserveAspectRatio="none">
+              <!-- Background continuous game audio -->
+              <path d="M 0 20 Q 25 5, 50 20 T 100 20 T 150 20 T 200 8 T 250 20 T 300 12 T 350 20 T 400 20 T 450 10 T 500 20" fill="none" stroke="currentColor" stroke-width="2.5" />
+              <path d="M 0 20 Q 25 35, 50 20 T 100 20 T 150 20 T 200 32 T 250 20 T 300 28 T 350 20 T 400 20 T 450 30 T 500 20" fill="none" stroke="currentColor" stroke-width="2.5" />
+            </svg>
+            <!-- Playhead line mirror -->
+            <div class="absolute top-0 bottom-0 left-[83%] w-0.5 bg-cyan-400/80"></div>
+          </div>
+        </div>
+
+        <!-- Track 2 Lane (Mic with speech bursts and silence) -->
+        <div class="rounded-lg border border-emerald-900/40 bg-slate-950/80 p-3 space-y-2">
+          <div class="flex items-center justify-between text-xs">
+            <label class="flex items-center gap-2 cursor-pointer font-medium text-slate-200">
+              <input type="checkbox" checked class="accent-emerald-500 h-4 w-4 rounded">
+              <span class="font-semibold text-emerald-400">Track 2:</span> Mic / Auxiliary
+            </label>
+            <div class="flex items-center gap-3">
+              <div class="flex items-center gap-2 font-mono text-[11px] text-slate-300">
+                <span class="text-amber-400 font-bold">Boost:</span>
+                <input type="range" min="0" max="200" value="140" class="w-24 h-1.5 bg-slate-800 rounded-lg cursor-pointer" oninput="document.getElementById('vol2').innerText = this.value + '%'">
+                <span id="vol2" class="w-10 text-right text-amber-400 font-bold">140%</span>
+              </div>
+              <button class="px-2 py-0.5 rounded text-[11px] border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300">Mute</button>
+            </div>
+          </div>
+          <!-- Waveform Display showing voice peaks & flat silence -->
+          <div class="relative h-10 w-full bg-slate-900 rounded border border-slate-800/80 overflow-hidden flex items-center px-1">
+            <svg class="w-full h-8 text-amber-400/80" viewBox="0 0 500 40" preserveAspectRatio="none">
+              <!-- Silence, then speech bursts, silence, speech -->
+              <line x1="0" y1="20" x2="80" y2="20" stroke="currentColor" stroke-width="1.5" opacity="0.4" />
+              <!-- Speech 1 -->
+              <path d="M 80 20 Q 95 2, 110 20 T 140 20 T 170 4 T 190 20" fill="none" stroke="currentColor" stroke-width="2.5" />
+              <path d="M 80 20 Q 95 38, 110 20 T 140 20 T 170 36 T 190 20" fill="none" stroke="currentColor" stroke-width="2.5" />
+              <!-- Silence -->
+              <line x1="190" y1="20" x2="280" y2="20" stroke="currentColor" stroke-width="1.5" opacity="0.4" />
+              <!-- Speech 2 -->
+              <path d="M 280 20 Q 300 0, 320 20 T 360 20 T 390 2 T 420 20" fill="none" stroke="currentColor" stroke-width="3" />
+              <path d="M 280 20 Q 300 40, 320 20 T 360 20 T 390 38 T 420 20" fill="none" stroke="currentColor" stroke-width="3" />
+              <!-- Silence -->
+              <line x1="420" y1="20" x2="500" y2="20" stroke="currentColor" stroke-width="1.5" opacity="0.4" />
+            </svg>
+            <div class="absolute top-0 bottom-0 left-[83%] w-0.5 bg-cyan-400/80"></div>
+            <span class="absolute right-2 text-[10px] text-amber-300 font-mono">Speech Detected</span>
+          </div>
+        </div>
+
+        <!-- Track 3 Lane (Unchecked) -->
+        <div class="rounded-lg border border-slate-800 bg-slate-950/40 p-3 space-y-2 opacity-50 hover:opacity-100 transition-opacity">
+          <div class="flex items-center justify-between text-xs">
+            <label class="flex items-center gap-2 cursor-pointer font-medium text-slate-400">
+              <input type="checkbox" class="accent-emerald-500 h-4 w-4 rounded">
+              <span><strong class="text-slate-400">Track 3:</strong> Discord / Voice Chat</span>
+            </label>
+            <div class="flex items-center gap-3">
+              <div class="flex items-center gap-2 font-mono text-[11px] text-slate-500">
+                <span>Vol:</span>
+                <input type="range" min="0" max="200" value="80" disabled class="w-24 h-1.5 bg-slate-800 rounded-lg cursor-not-allowed">
+                <span class="w-10 text-right">80%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= LAYOUT 2: Compact Card (Alternative) ================= -->
+      <div id="layoutB" class="hidden space-y-3 pt-2">
+        <div class="rounded-lg border border-slate-800 bg-slate-950 p-4 space-y-3">
+          <div class="text-xs font-semibold text-slate-300 uppercase tracking-wider">Multi-Track Mix Console</div>
+          <div class="grid grid-cols-2 gap-3">
+            <div class="p-2.5 rounded border border-slate-800 bg-slate-900/70 flex items-center justify-between">
+              <div>
+                <label class="flex items-center gap-1.5 text-xs font-medium text-emerald-400">
+                  <input type="checkbox" checked class="accent-emerald-500"> Track 1: Desktop
+                </label>
+                <span class="text-[10px] text-slate-400 font-mono">Active (peaks: -6dB)</span>
+              </div>
+              <div class="text-right">
+                <input type="range" min="0" max="200" value="100" class="w-20 h-1 bg-slate-800">
+                <div class="text-[10px] font-mono text-slate-300">100%</div>
+              </div>
+            </div>
+
+            <div class="p-2.5 rounded border border-slate-800 bg-slate-900/70 flex items-center justify-between">
+              <div>
+                <label class="flex items-center gap-1.5 text-xs font-medium text-amber-400">
+                  <input type="checkbox" checked class="accent-emerald-500"> Track 2: Mic/Aux
+                </label>
+                <span class="text-[10px] text-slate-400 font-mono">Active (peaks: -14dB)</span>
+              </div>
+              <div class="text-right">
+                <input type="range" min="0" max="200" value="140" class="w-20 h-1 bg-slate-800">
+                <div class="text-[10px] font-mono text-amber-400">140% (+3dB)</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Control Bar (Updated) -->
+      <div class="pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-3 text-xs">
+        <button class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-semibold text-white flex items-center gap-1">
+          ▶ Play range
+        </button>
+
+        <!-- Toggle Button for Audio Drawer -->
+        <button id="toggleDrawerBtn" class="px-2.5 py-1.5 rounded-lg border border-emerald-700/60 bg-emerald-950/40 text-emerald-300 font-medium hover:bg-emerald-900/50 flex items-center gap-1.5">
+          <span>🎚️ Audio Tracks (2 selected)</span>
+          <span class="text-[10px] text-emerald-400 font-mono">▲ Hide</span>
+        </button>
+
+        <label class="flex items-center gap-1.5 text-slate-300 text-xs">
+          <input type="checkbox" checked class="accent-emerald-500">
+          <span>Normalize mix (loudnorm)</span>
+        </label>
+
+        <span class="text-xs text-slate-500">0:50.2 selected</span>
+
+        <div class="ml-auto flex gap-2">
+          <button class="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800 text-slate-300 font-medium">+ Add part</button>
+          <button class="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800 text-slate-400">Cancel</button>
+          <button class="rounded-lg bg-emerald-600 px-4 py-1.5 hover:bg-emerald-500 font-semibold text-white">Apply</button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Explanation Card -->
+    <div class="p-4 rounded-xl border border-slate-800 bg-slate-900/60 space-y-2 text-xs text-slate-300 leading-relaxed">
+      <h3 class="font-bold text-emerald-400 uppercase tracking-wide">Key Features Demonstrated in Mockup:</h3>
+      <ul class="list-disc pl-5 space-y-1">
+        <li><strong>Track Names from OBS:</strong> Instead of generic "track 1, track 2", shows parsed OBS stream title (e.g. "Desktop Audio", "Mic / Auxiliary").</li>
+        <li><strong>Waveform Activity Lanes:</strong> Notice Track 2 displays flat lines during silence and curved peaks when talking. This lets you cut right before speech starts.</li>
+        <li><strong>Volume & Boost Slider:</strong> Sliders go 0% to 200%. >100% highlights in amber with dB boost note.</li>
+        <li><strong>Multi-Track Checkboxes:</strong> Check any combination to include in final WhatsApp output video (mixed into single AAC stereo track via ffmpeg <code class="bg-slate-800 px-1 py-0.5 rounded text-emerald-300">amix</code>).</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    function setLayout(mode) {
+      if (mode === 'A') {
+        document.getElementById('layoutA').classList.remove('hidden');
+        document.getElementById('layoutB').classList.add('hidden');
+        document.getElementById('btnLayoutA').className = 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white';
+        document.getElementById('btnLayoutB').className = 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700';
+      } else {
+        document.getElementById('layoutA').classList.add('hidden');
+        document.getElementById('layoutB').classList.remove('hidden');
+        document.getElementById('btnLayoutB').className = 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white';
+        document.getElementById('btnLayoutA').className = 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700';
+      }
+    }
+  </script>
+</body>
+</html>
