@@ -1,7 +1,19 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type Trim = { start: number; end: number };
+export type Trim = {
+  start: number;
+  end: number;
+  customName?: string;
+};
+
+export type SpeedRange = {
+  start: number;
+  end: number;
+  speed: number;
+  fitTarget: boolean;
+  targetDuration?: number;
+};
 export type FileStatus = "queued" | "running" | "done" | "failed" | "canceled" | "skipped";
 export type AudioOpt = "keep" | "mute" | "75" | "50" | "25";
 export type OutputFile = { path: string; size: number; name?: string };
@@ -72,6 +84,7 @@ export type VideoFile = {
 export type FileState = VideoFile & {
   /** Zero ranges = whole file; one = plain trim; several = multi-part split. */
   trims: Trim[];
+  speedRange: SpeedRange | null;
   audio: AudioOpt;
   audioSource: AudioSource;
   normalize: boolean;
@@ -84,7 +97,7 @@ export type FileState = VideoFile & {
 
 export type Summary = { converted: number; failed: number; skipped: number; canceled: boolean };
 
-type Store = {
+export type StoreState = {
   folder: string | null;
   files: FileState[];
   preset: string;
@@ -105,6 +118,11 @@ type Store = {
   encoder: string | null;
   extraArgs: string;
   customPresets: CustomPreset[];
+  lastCustomLen: number;
+  lowCpuPriority: boolean;
+  stripMetadata: boolean;
+  namingPattern: string;
+  deleteSourceToTrash: boolean;
 
   setFfmpegError: (e: string | null) => void;
   setFolder: (folder: string, files: VideoFile[]) => void;
@@ -136,11 +154,26 @@ type Store = {
     outputs: OutputFile[],
   ) => void;
   batchDone: (s: Summary) => void;
+
+  setLastCustomLen: (len: number) => void;
+  setLowCpuPriority: (low: boolean) => void;
+  setStripMetadata: (strip: boolean) => void;
+  setNamingPattern: (pattern: string) => void;
+  setDeleteSourceToTrash: (del: boolean) => void;
+  setSpeedRange: (target: string | number, speedRange: SpeedRange | null) => void;
+  setTrimCustomName: (fileIndex: number, trimIndex: number, customName: string) => void;
+
+  copyAudioToAll: (sourceIndex: number) => void;
+  autoSplitAll: (partSeconds: number) => void;
+  clearAllTrims: () => void;
 };
+
+export type Store = StoreState;
 
 const fresh = (f: VideoFile): FileState => ({
   ...f,
   trims: [],
+  speedRange: null,
   audio: "keep",
   audioSource: "default",
   normalize: false,
@@ -171,6 +204,11 @@ export const useStore = create<Store>()(
       extraArgs: "",
       customPresets: [],
 
+      lastCustomLen: 15,
+      lowCpuPriority: false,
+      stripMetadata: true,
+      namingPattern: "{name}_whatsapp_{preset}{part}",
+      deleteSourceToTrash: false,
       setFfmpegError: (ffmpegError) => set({ ffmpegError }),
 
       setFolder: (folder, files) => set({ folder, summary: null, files: files.map(fresh) }),
@@ -263,6 +301,69 @@ export const useStore = create<Store>()(
             f.status === "running" || f.status === "queued" ? { ...f, status: "canceled" } : f,
           ),
         })),
+
+      setLastCustomLen: (lastCustomLen) => set({ lastCustomLen }),
+      setLowCpuPriority: (lowCpuPriority) => set({ lowCpuPriority }),
+      setStripMetadata: (stripMetadata) => set({ stripMetadata }),
+      setNamingPattern: (namingPattern) => set({ namingPattern }),
+      setDeleteSourceToTrash: (deleteSourceToTrash) => set({ deleteSourceToTrash }),
+      setSpeedRange: (target, speedRange) =>
+        set((s) => ({
+          files: s.files.map((f, i) =>
+            (typeof target === "string" ? f.path === target : i === target)
+              ? { ...f, speedRange }
+              : f,
+          ),
+        })),
+      setTrimCustomName: (fileIndex, trimIndex, customName) =>
+        set((s) => ({
+          files: s.files.map((f, fi) => {
+            if (fi !== fileIndex) return f;
+            const trims = f.trims.map((t, ti) =>
+              ti === trimIndex ? { ...t, customName } : t,
+            );
+            return { ...f, trims };
+          }),
+        })),
+
+      copyAudioToAll: (sourceIndex) =>
+        set((s) => {
+          const src = s.files[sourceIndex];
+          if (!src) return s;
+          const { audio, audioSource, normalize } = src;
+          return {
+          files: s.files.map((f) => {
+            let safeAudioSource = audioSource;
+            if (typeof audioSource === "number") {
+              safeAudioSource = f.audioTracks > audioSource ? audioSource : "default";
+            }
+            return { ...f, audio, audioSource: safeAudioSource, normalize };
+          }),
+          };
+        }),
+
+      autoSplitAll: (partSeconds) =>
+        set((s) => {
+          if (!Number.isFinite(partSeconds) || partSeconds <= 0) return s;
+          return {
+            files: s.files.map((f) => {
+              if (!f.duration || f.duration <= 0) return f;
+              const trims: Trim[] = [];
+              for (let start = 0; start < f.duration; start += partSeconds) {
+                trims.push({
+                  start,
+                  end: Math.min(start + partSeconds, f.duration),
+                });
+              }
+              return { ...f, trims };
+            }),
+          };
+        }),
+
+      clearAllTrims: () =>
+        set((s) => ({
+          files: s.files.map((f) => ({ ...f, trims: [], speedRange: null })),
+        })),
     }),
     {
       name: "kecilin-prefs",
@@ -276,6 +377,11 @@ export const useStore = create<Store>()(
         encoder: s.encoder,
         extraArgs: s.extraArgs,
         customPresets: s.customPresets,
+        lastCustomLen: s.lastCustomLen,
+        lowCpuPriority: s.lowCpuPriority,
+        stripMetadata: s.stripMetadata,
+        namingPattern: s.namingPattern,
+        deleteSourceToTrash: s.deleteSourceToTrash,
       }),
     },
   ),

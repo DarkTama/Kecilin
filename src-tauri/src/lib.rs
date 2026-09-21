@@ -28,6 +28,7 @@ pub fn run() {
             commands::skip_file,
             commands::open_output_folder,
             commands::prepare_preview,
+            commands::cancel_preview,
             commands::prepare_thumbnail,
             commands::reveal_file,
             commands::copy_file_to_clipboard,
@@ -42,6 +43,7 @@ pub fn run() {
                 if let Some(state) = window.app_handle().try_state::<BatchState>() {
                     state.abort();
                 }
+                commands::abort_all_previews();
             }
         })
         .run(tauri::generate_context!())
