@@ -550,6 +550,10 @@ pub(crate) fn build_ffmpeg_args(
         .map(|t| !t.is_empty() && t.iter().all(|x| !x.enabled || x.volume <= 0.001))
         .unwrap_or(false);
     let mute = audio.level == Some("mute") || multi_track_all_disabled;
+    let tracks_premixed = audio
+        .tracks_info
+        .map(|t| t.iter().any(|x| x.enabled && x.volume > 0.001))
+        .unwrap_or(false);
 
     let mut a: Vec<String> = vec!["-y".into()];
     if let Some(t) = trim {
@@ -584,7 +588,7 @@ pub(crate) fn build_ffmpeg_args(
             &normalized,
             p.height,
             !mute,
-            audio.level,
+            if tracks_premixed { None } else { audio.level },
             audio.normalize,
             duration,
             audio.tracks_info,
@@ -862,7 +866,8 @@ pub(crate) fn build_speed_filtergraph(
         if normalize {
             af.push(LOUDNORM.to_string());
         }
-        match audio_level {
+        let effective_audio_level = if tracks_premixed { None } else { audio_level };
+        match effective_audio_level {
             Some("75") => af.push("volume=0.75".into()),
             Some("50") => af.push("volume=0.5".into()),
             Some("25") => af.push("volume=0.25".into()),
@@ -1355,7 +1360,18 @@ pub async fn extract_track_audio(
         .join("audio_tracks");
     fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
 
-    let hash = format!("{:016x}", stable_hash(&format!("{path}:{index}")));
+    let (mtime, size) = fs::metadata(&path)
+        .map(|m| {
+            let mt = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (mt, m.len())
+        })
+        .unwrap_or((0, 0));
+    let hash = format!("{:x}", stable_hash(&format!("{path}|{mtime}|{size}:{index}")));
     let out_path = cache_dir.join(format!("{hash}.m4a"));
     let out_str = out_path.to_str().ok_or("invalid utf-8 path")?.to_string();
 
@@ -2243,6 +2259,51 @@ mod tests {
         assert!(graph.contains("concat=n=3:v=1:a=1[vcat][acat]"));
         assert!(graph.contains(&format!("[acat]{}[aout]", LOUDNORM)));
         assert!(a.contains(&"[aout]".to_string()));
+    }
+
+    #[test]
+    fn speed_ranges_with_multi_track_does_not_append_volume_filter_after_concat() {
+        let p = builtin_preset("480p").unwrap();
+        let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
+        let sr = SpeedRange {
+            start: 3.0,
+            end: 6.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 0.8 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+        ];
+        let opts = AudioOpts {
+            tracks_info: Some(&tracks),
+            level: Some("50"),
+            normalize: false,
+            ..Default::default()
+        };
+        let a = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            opts,
+            None,
+            &[],
+            false,
+            std::slice::from_ref(&sr),
+            None,
+        );
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
+        let graph = &a[i + 1];
+        assert!(graph.contains("[0:a:0]volume=0.800[track_a0]"));
+        assert!(graph.contains("[0:a:1]volume=1.400[track_a1]"));
+        assert!(graph.contains("concat=n=3:v=1:a=1[vcat][acat]"));
+        // Post-concat [acat] should NOT have volume filter
+        assert!(!graph.contains("volume=0.5"));
+        assert!(!graph.contains("[acat]volume"));
+        // Final audio map directly references [acat]
+        assert!(a.contains(&"[acat]".to_string()));
     }
 
     #[test]

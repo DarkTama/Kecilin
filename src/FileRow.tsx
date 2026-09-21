@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { engine } from "./engine";
 import {
   calculateEffectiveDuration,
@@ -316,8 +316,70 @@ function TrimEditor({
   const [audioDrawerOpen, setAudioDrawerOpen] = useState(false);
   const mixerRef = useRef<AudioTrackMixer | null>(null);
   const loadedTracks = useRef<Set<number>>(new Set());
+  const mixerSpedPausedRef = useRef(false);
+
+  const videoAudioCtxRef = useRef<AudioContext | null>(null);
+  const videoSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const videoGainNodeRef = useRef<GainNode | null>(null);
+  const connectedVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const tracks = file.audioTracksInfo ?? [];
+
+  const setupVideoAudio = useCallback(() => {
+    const v = videoRef.current;
+    if (!v || isMultiTrack) return;
+    if (connectedVideoRef.current === v && videoGainNodeRef.current) {
+      if (videoAudioCtxRef.current?.state === "suspended") {
+        void videoAudioCtxRef.current.resume();
+      }
+      return;
+    }
+
+    try {
+      const AudioCtx =
+        typeof window !== "undefined"
+          ? window.AudioContext ||
+            (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+          : undefined;
+      if (!AudioCtx) return;
+
+      if (!videoAudioCtxRef.current || videoAudioCtxRef.current.state === "closed") {
+        videoAudioCtxRef.current = new AudioCtx();
+      }
+      const ctx = videoAudioCtxRef.current;
+      if (ctx.state === "suspended") {
+        void ctx.resume();
+      }
+
+      if (connectedVideoRef.current !== v) {
+        videoSourceNodeRef.current?.disconnect();
+        videoGainNodeRef.current?.disconnect();
+
+        const srcNode = ctx.createMediaElementSource(v);
+        const gainNode = ctx.createGain();
+        srcNode.connect(gainNode);
+        gainNode.connect(ctx.destination);
+
+        videoSourceNodeRef.current = srcNode;
+        videoGainNodeRef.current = gainNode;
+        connectedVideoRef.current = v;
+      }
+    } catch {
+      // AudioContext or createMediaElementSource may fail in unsupported environments
+    }
+  }, [isMultiTrack]);
+
+  useEffect(() => {
+    return () => {
+      if (videoAudioCtxRef.current) {
+        void videoAudioCtxRef.current.close();
+        videoAudioCtxRef.current = null;
+        videoSourceNodeRef.current = null;
+        videoGainNodeRef.current = null;
+        connectedVideoRef.current = null;
+      }
+    };
+  }, []);
 
   // Multi-track audio mixer initialization and cleanup
   useEffect(() => {
@@ -351,7 +413,15 @@ function TrimEditor({
           await mixer.loadTrack(t.index, url);
           if (!active) return;
           loadedTracks.current.add(t.index);
-          mixer.setTrackVolume(t.index, t.volume, t.muted || !t.enabled);
+          const currentTracks = useStore
+            .getState()
+            .files.find((f) => f.path === file.path)?.audioTracksInfo;
+          const currentTrack = currentTracks?.find((x) => x.index === t.index) ?? t;
+          mixer.setTrackVolume(
+            t.index,
+            currentTrack.volume,
+            currentTrack.muted || !currentTrack.enabled
+          );
           if (videoRef.current && !videoRef.current.paused) {
             mixer.play(videoRef.current.currentTime);
           }
@@ -411,11 +481,30 @@ function TrimEditor({
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const targetMuted = isMultiTrack ? true : singleTrackVol === 0;
-    const targetVol = isMultiTrack ? 1 : Math.min(1, Math.max(0, singleTrackVol / 100));
-    if (v.muted !== targetMuted) v.muted = targetMuted;
-    if (v.volume !== targetVol) v.volume = targetVol;
-  }, [isMultiTrack, singleTrackVol, playhead]);
+    if (isMultiTrack) {
+      if (!v.muted) v.muted = true;
+      if (videoGainNodeRef.current) {
+        videoGainNodeRef.current.gain.value = 0;
+      }
+      return;
+    }
+
+    if (singleTrackVol > 100) {
+      setupVideoAudio();
+    }
+
+    if (videoGainNodeRef.current && videoAudioCtxRef.current) {
+      const volRatio = singleTrackVol / 100;
+      videoGainNodeRef.current.gain.value = volRatio;
+      v.volume = 1;
+      v.muted = singleTrackVol === 0;
+    } else {
+      const targetMuted = singleTrackVol === 0;
+      const targetVol = Math.min(1, Math.max(0, singleTrackVol / 100));
+      if (v.muted !== targetMuted) v.muted = targetMuted;
+      if (v.volume !== targetVol) v.volume = targetVol;
+    }
+  }, [isMultiTrack, singleTrackVol, setupVideoAudio]);
 
   // ---- Speed ramp (fast forward) state --------------------------------------
   // `ranges` below is the trim list; this is the list of fast-forward windows
@@ -766,6 +855,7 @@ function TrimEditor({
     if (!speedRampEnabled || !playing) {
       v.playbackRate = 1;
       setLiveRate(1);
+      mixerSpedPausedRef.current = false;
       return;
     }
     // Remember the user's own mute choice so cleanup restores it rather than
@@ -779,6 +869,22 @@ function TrimEditor({
         const rate = resolvePlaybackRate(el.currentTime, liveRanges, true);
         if (el.playbackRate !== rate) el.playbackRate = rate;
         setLiveRate(rate);
+
+        const inSped = rate !== 1;
+        if (isMultiTrack && mixerRef.current) {
+          if (inSped) {
+            if (!mixerSpedPausedRef.current) {
+              mixerRef.current.pause();
+              mixerSpedPausedRef.current = true;
+            }
+          } else {
+            if (mixerSpedPausedRef.current && !el.paused) {
+              mixerRef.current.play(el.currentTime);
+              mixerSpedPausedRef.current = false;
+            }
+          }
+        }
+
         const mute =
           isMultiTrack ||
           userMuted ||
@@ -795,6 +901,7 @@ function TrimEditor({
     frame = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(frame);
+      mixerSpedPausedRef.current = false;
       const el = videoRef.current;
       if (el) {
         el.playbackRate = 1;
@@ -802,7 +909,7 @@ function TrimEditor({
       }
       setLiveRate(1);
     };
-  }, [showVideo, playing, speedRampEnabled, previewMuted]);
+  }, [showVideo, playing, speedRampEnabled, previewMuted, isMultiTrack]);
 
   function apply() {
     let out = ranges;
@@ -873,18 +980,49 @@ function TrimEditor({
               setPlaying(true);
               if (isMultiTrack) {
                 if (videoRef.current) videoRef.current.muted = true;
-                mixerRef.current?.play(videoRef.current?.currentTime ?? 0);
+                const el = videoRef.current;
+                const { ranges: liveRanges } = rampRef.current;
+                const inSped =
+                  speedRampEnabled &&
+                  el &&
+                  resolvePlaybackRate(el.currentTime, liveRanges, true) !== 1;
+                if (!inSped) {
+                  mixerRef.current?.play(el?.currentTime ?? 0);
+                  mixerSpedPausedRef.current = false;
+                } else {
+                  mixerSpedPausedRef.current = true;
+                }
+              } else {
+                if (singleTrackVol > 100) {
+                  setupVideoAudio();
+                }
+                if (videoAudioCtxRef.current?.state === "suspended") {
+                  void videoAudioCtxRef.current.resume();
+                }
               }
             }}
             onPause={() => {
               setPlaying(false);
+              mixerSpedPausedRef.current = false;
               if (isMultiTrack) {
                 mixerRef.current?.pause();
               }
             }}
             onSeeked={(e) => {
               if (isMultiTrack) {
-                mixerRef.current?.seek(e.currentTarget.currentTime);
+                const { ranges: liveRanges } = rampRef.current;
+                const inSped =
+                  speedRampEnabled &&
+                  resolvePlaybackRate(e.currentTarget.currentTime, liveRanges, true) !== 1;
+                if (!inSped && !e.currentTarget.paused) {
+                  mixerRef.current?.seek(e.currentTarget.currentTime);
+                  mixerSpedPausedRef.current = false;
+                } else if (inSped) {
+                  mixerRef.current?.pause();
+                  mixerSpedPausedRef.current = true;
+                } else {
+                  mixerRef.current?.seek(e.currentTarget.currentTime);
+                }
               }
             }}
             onSeeking={(e) => {

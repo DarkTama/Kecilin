@@ -172,7 +172,7 @@ export function AudioDrawer({
                         : "border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300"
                     }`}
                   >
-                    {track.muted ? "Muted" : "Mute"}
+                    {track.muted ? t("muted") : t("mute")}
                   </button>
                 </div>
               </div>
