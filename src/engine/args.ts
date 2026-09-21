@@ -89,7 +89,9 @@ export function calculateEffectiveDuration(
 ): number {
   const tStart = trim?.start ?? 0;
   const tEnd = trim?.end ?? totalDuration;
-  if (!speedRange || speedRange.speed <= 1.0) {
+  // A non-finite speed is treated as "no speedup" so this stays in step with
+  // `buildOutputSegments` in src/preview.ts, which draws the same result.
+  if (!speedRange || !Number.isFinite(speedRange.speed) || speedRange.speed <= 1.0) {
     return tEnd - tStart;
   }
   const sStart = Math.max(tStart, Math.min(tEnd, speedRange.start));

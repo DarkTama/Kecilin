@@ -3,6 +3,12 @@ import { engine } from "./engine";
 import { calculateEffectiveDuration, outputName, solveSpeedMultiplier } from "./engine/args";
 import { fmtSize, fmtTime, parseTime } from "./format";
 import { useT } from "./i18n";
+import {
+  MAX_PREVIEW_RATE,
+  buildOutputSegments,
+  resolvePlaybackRate,
+  shouldMutePreview,
+} from "./preview";
 import { resolvePreset, useStore } from "./store";
 import type { AudioOpt, FileState, SpeedRange, Trim } from "./store";
 
@@ -558,6 +564,66 @@ function TrimEditor({
   const effDur = calculateEffectiveDuration(totalDur, activeTrim, currentSpeedRange);
   const savedSecs = Math.max(0, origDur - effDur);
 
+  // ---- Fast-forward preview -------------------------------------------------
+  // A to-scale picture of the rendered result, and a live playbackRate ramp so
+  // the preview element actually speeds up inside the marked range.
+  const outputSegments = buildOutputSegments(totalDur, activeTrim, currentSpeedRange);
+  const previewCapped = speedRampEnabled && effectiveSpeed > MAX_PREVIEW_RATE;
+
+  // Rate actually applied to the element, reported by the rAF loop. Driving the
+  // badge from `playhead` instead would lag by up to a timeupdate tick, which
+  // is seconds of media time once the rate is high.
+  const [liveRate, setLiveRate] = useState(1);
+
+  // The loop reads its inputs through a ref so that dragging a speed handle
+  // retunes the running loop instead of tearing it down and rebuilding it on
+  // every pointer move.
+  const rampRef = useRef({ range: currentSpeedRange, trimEnd: end });
+  rampRef.current = { range: currentSpeedRange, trimEnd: end };
+
+  // Drive playbackRate from rAF, not onTimeUpdate: that event fires about four
+  // times a second, which overshoots the range boundary badly at high rates.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !showVideo) return;
+    if (!speedRampEnabled || !playing) {
+      v.playbackRate = 1;
+      setLiveRate(1);
+      return;
+    }
+    // Remember the user's own mute choice so cleanup restores it rather than
+    // unmuting something they silenced.
+    const userMuted = v.muted;
+    let frame = 0;
+    const tick = () => {
+      const el = videoRef.current;
+      if (el) {
+        const { range, trimEnd } = rampRef.current;
+        const rate = resolvePlaybackRate(el.currentTime, range, true);
+        if (el.playbackRate !== rate) el.playbackRate = rate;
+        setLiveRate(rate);
+        const mute = userMuted || shouldMutePreview(el.currentTime, range, true);
+        if (el.muted !== mute) el.muted = mute;
+        // The `onTimeUpdate` auto-pause cannot see the trim end at high rates:
+        // one tick advances 0.25 * rate seconds of media. Stop it here instead.
+        if (!el.paused && el.currentTime >= trimEnd && el.currentTime < trimEnd + 0.5 * rate) {
+          el.pause();
+        }
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(frame);
+      const el = videoRef.current;
+      if (el) {
+        el.playbackRate = 1;
+        el.muted = userMuted;
+      }
+      setLiveRate(1);
+    };
+  }, [showVideo, playing, speedRampEnabled]);
+
   function apply() {
     let out = ranges;
     if (out.length === 0) {
@@ -609,36 +675,53 @@ function TrimEditor({
   return (
     <div className="flex flex-col gap-3 border-t border-slate-800 px-4 py-4">
       {showVideo && (
-        <video
-          key={src}
-          ref={videoRef}
-          src={src}
-          className="max-h-64 w-full rounded-lg bg-black"
-          onError={() => void fallbackToProxy()}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-          onLoadedMetadata={(e) => {
-            const v = e.currentTarget;
-            if (Number.isFinite(v.duration)) {
-              setDuration((d) => d ?? v.duration);
-              if (end <= 0) update(start, v.duration);
-              if (speedEnd <= 0) {
-                setSpeedEnd(v.duration);
-                setSpeedEndText(fmtTime(v.duration));
+        <div className="relative">
+          <video
+            key={src}
+            ref={videoRef}
+            src={src}
+            className="max-h-64 w-full rounded-lg bg-black"
+            onError={() => void fallbackToProxy()}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+            onLoadedMetadata={(e) => {
+              const v = e.currentTarget;
+              if (Number.isFinite(v.duration)) {
+                setDuration((d) => d ?? v.duration);
+                if (end <= 0) update(start, v.duration);
+                if (speedEnd <= 0) {
+                  setSpeedEnd(v.duration);
+                  setSpeedEndText(fmtTime(v.duration));
+                }
               }
-            }
-            // Audio decodes but the video track can't: no error fires and
-            // videoWidth stays 0 — switch to the ffmpeg proxy.
-            if (v.videoWidth === 0) void fallbackToProxy();
-          }}
-          onTimeUpdate={(e) => {
-            const v = e.currentTarget;
-            setPlayhead(v.currentTime);
-            // Auto-pause when playback crosses the range end (but let seeks
-            // beyond it play freely — "start from the middle" is allowed).
-            if (!v.paused && v.currentTime >= end && v.currentTime < end + 0.5) v.pause();
-          }}
-        />
+              // Audio decodes but the video track can't: no error fires and
+              // videoWidth stays 0 — switch to the ffmpeg proxy.
+              if (v.videoWidth === 0) void fallbackToProxy();
+            }}
+            onTimeUpdate={(e) => {
+              const v = e.currentTarget;
+              setPlayhead(v.currentTime);
+              // Auto-pause when playback crosses the range end (but let seeks
+              // beyond it play freely — "start from the middle" is allowed).
+              // Backstop for the rAF pause: the window can be hidden, which
+              // stops rAF while playback continues. Scale by the live rate.
+              const win = 0.5 * Math.max(1, v.playbackRate);
+              if (!v.paused && v.currentTime >= end && v.currentTime < end + win) v.pause();
+            }}
+          />
+          {liveRate > 1 && (
+            <div className="pointer-events-none absolute right-2 top-2 flex flex-col items-end gap-1">
+              <span className="rounded-full bg-amber-500/90 px-2 py-0.5 text-xs font-semibold text-slate-950 shadow-lg">
+                ⚡ {liveRate.toFixed(2)}×
+              </span>
+              {previewCapped && (
+                <span className="rounded bg-slate-950/85 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
+                  {t("previewCapped", { max: String(MAX_PREVIEW_RATE) })}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
       )}
       {preview === "preparing" && (
         <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
@@ -800,6 +883,39 @@ function TrimEditor({
           labels={[t("trimStart"), t("trimEnd")]}
           speedLabels={[t("speedStart"), t("speedEnd")]}
         />
+      )}
+
+      {/* Output preview strip: the rendered result drawn to scale. */}
+      {speedRampEnabled && outputSegments.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between text-[11px] text-slate-400">
+            <span>{t("outputPreview")}</span>
+            <span className="font-mono">
+              {t("outputDuration", { out: fmtTime(effDur) })}
+              {savedSecs > 0.05 && origDur > 0 && (
+                <span className="ml-1.5 text-emerald-400">
+                  −{Math.round((savedSecs / origDur) * 100)}%
+                </span>
+              )}
+            </span>
+          </div>
+          <div className="flex h-2 w-full overflow-hidden rounded-full bg-slate-900">
+            {outputSegments.map((seg, i) => (
+              <div
+                key={i}
+                title={`${seg.kind === "sped" ? `${effectiveSpeed.toFixed(2)}×` : "1×"} · ${fmtTime(seg.outputDuration)}`}
+                // minWidth keeps a very short segment from rendering sub-pixel
+                // and disappearing; flexShrink lets the row still fit exactly.
+                style={{ width: `${seg.fraction * 100}%`, minWidth: "3px" }}
+                className={
+                  seg.kind === "sped"
+                    ? "h-full shrink-0 border-r border-slate-950 bg-amber-500 last:border-r-0"
+                    : "h-full shrink-0 border-r border-slate-950 bg-slate-600 last:border-r-0"
+                }
+              />
+            ))}
+          </div>
+        </div>
       )}
 
       {/* Speed Ramp (Fast Forward) Control Deck */}
