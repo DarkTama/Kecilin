@@ -411,12 +411,10 @@ function TrimEditor({
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    if (isMultiTrack) {
-      v.muted = true;
-    } else {
-      v.muted = singleTrackVol === 0;
-      v.volume = Math.min(1, Math.max(0, singleTrackVol / 100));
-    }
+    const targetMuted = isMultiTrack ? true : singleTrackVol === 0;
+    const targetVol = isMultiTrack ? 1 : Math.min(1, Math.max(0, singleTrackVol / 100));
+    if (v.muted !== targetMuted) v.muted = targetMuted;
+    if (v.volume !== targetVol) v.volume = targetVol;
   }, [isMultiTrack, singleTrackVol, playhead]);
 
   // ---- Speed ramp (fast forward) state --------------------------------------
@@ -1422,7 +1420,7 @@ function TrimEditor({
             onClick={() => setAudioDrawerOpen((o) => !o)}
             className="px-2.5 py-1 rounded-md border border-emerald-700/60 bg-emerald-950/40 text-emerald-300 text-xs font-medium hover:bg-emerald-900/50 flex items-center gap-1"
           >
-            🎚️ {t("audioTracks")} ({enabledTrackCount} {t("tracksSelected")})
+            🎚️ {t("audioTracks")} ({t("tracksSelected", { n: enabledTrackCount })})
             <span className="text-[10px] font-mono">{audioDrawerOpen ? "▲" : "▼"}</span>
           </button>
         ) : (
