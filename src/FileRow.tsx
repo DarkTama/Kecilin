@@ -343,6 +343,21 @@ function TrimEditor({
     setEnd(ne);
     setStartText(fmtTime(ns));
     setEndText(fmtTime(ne));
+
+    // Strictly clamp speed range inside new trim [ns, ne]
+    if (speedRampEnabled) {
+      setSpeedStart((curSs) => {
+        const nextSs = Math.max(ns, Math.min(ne - 0.1, curSs));
+        setSpeedStartText(fmtTime(nextSs));
+        return nextSs;
+      });
+      setSpeedEnd((curSe) => {
+        const nextSe = Math.min(ne, Math.max(ns + 0.1, curSe));
+        setSpeedEndText(fmtTime(nextSe));
+        return nextSe;
+      });
+    }
+
     const v = videoRef.current;
     if (v && scrubTo != null && showVideo) v.currentTime = scrubTo;
   }
@@ -360,6 +375,65 @@ function TrimEditor({
       slideTo(moved === "start" ? ns : ne - fixedLen, fixedLen);
     } else {
       update(ns, ne, moved === "start" ? ns : ne);
+    }
+  }
+
+  function handleSpeedRange(ns: number, ne: number, moved: "start" | "end") {
+    // Strictly clamp within trim boundaries [start, end]
+    const clampedStart = Math.max(start, Math.min(end - 0.1, ns));
+    const clampedEnd = Math.min(end, Math.max(start + 0.1, ne));
+    setSpeedStart(clampedStart);
+    setSpeedEnd(clampedEnd);
+    setSpeedStartText(fmtTime(clampedStart));
+    setSpeedEndText(fmtTime(clampedEnd));
+
+    const totalDur = duration ?? end;
+    if (speedMode === "target") {
+      const targetVal = parseFloat(targetDurationInput) || 30;
+      const solved = solveSpeedMultiplier(targetVal, totalDur, { start, end }, clampedStart, clampedEnd);
+      setSpeedMultiplier(Number(solved.toFixed(2)));
+      setCustomSpeedMult(Number(solved.toFixed(2)).toString());
+    } else {
+      const outDur = calculateEffectiveDuration(totalDur, { start, end }, {
+        start: clampedStart,
+        end: clampedEnd,
+        speed: speedMultiplier,
+        fitTarget: false,
+      });
+      setTargetDurationInput(outDur.toFixed(1));
+    }
+
+    const v = videoRef.current;
+    if (v && showVideo) {
+      const scrub = moved === "start" ? clampedStart : clampedEnd;
+      v.currentTime = scrub;
+      setPlayhead(scrub);
+    }
+  }
+
+  function setMultiplierAndSyncTarget(mult: number) {
+    setSpeedMultiplier(mult);
+    setSpeedMode("fixed");
+    const totalDur = duration ?? end;
+    const outDur = calculateEffectiveDuration(totalDur, { start, end }, {
+      start: speedStart,
+      end: speedEnd,
+      speed: mult,
+      fitTarget: false,
+    });
+    setTargetDurationInput(outDur.toFixed(1));
+  }
+
+  function setTargetAndSyncMultiplier(targetStr: string) {
+    setTargetDurationInput(targetStr);
+    setSpeedMode("target");
+    const targetVal = parseFloat(targetStr);
+    if (Number.isFinite(targetVal) && targetVal > 0) {
+      const totalDur = duration ?? end;
+      const solved = solveSpeedMultiplier(targetVal, totalDur, { start, end }, speedStart, speedEnd);
+      const rounded = Number(solved.toFixed(2));
+      setSpeedMultiplier(rounded);
+      setCustomSpeedMult(rounded.toString());
     }
   }
 
@@ -382,15 +456,10 @@ function TrimEditor({
       setSpeedEndText(fmtTime(speedEnd));
       return;
     }
-    const max = duration ?? Number.POSITIVE_INFINITY;
     if (which === "start") {
-      const ns = Math.max(0, Math.min(Math.max(0, v), speedEnd - 0.1));
-      setSpeedStart(ns);
-      setSpeedStartText(fmtTime(ns));
+      handleSpeedRange(v, speedEnd, "start");
     } else {
-      const ne = Math.min(Math.max(v, speedStart + 0.1), max);
-      setSpeedEnd(ne);
-      setSpeedEndText(fmtTime(ne));
+      handleSpeedRange(speedStart, v, "end");
     }
   }
 
@@ -715,8 +784,12 @@ function TrimEditor({
           start={start}
           end={end}
           playhead={showVideo ? playhead : null}
-          speedRange={currentSpeedRange}
+          speedRampEnabled={speedRampEnabled}
+          speedStart={speedStart}
+          speedEnd={speedEnd}
+          speedMultiplier={effectiveSpeed}
           onChange={handleRange}
+          onSpeedChange={handleSpeedRange}
           onSeek={(tt) => {
             const v = videoRef.current;
             if (v && showVideo) {
@@ -725,6 +798,7 @@ function TrimEditor({
             }
           }}
           labels={[t("trimStart"), t("trimEnd")]}
+          speedLabels={[t("speedStart"), t("speedEnd")]}
         />
       )}
 
@@ -813,14 +887,14 @@ function TrimEditor({
             </div>
 
             {speedMode === "fixed" && (
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1.5">
                 {[1.5, 2, 4, 8].map((mult) => (
                   <button
                     key={mult}
                     type="button"
                     onClick={() => {
-                      setSpeedMultiplier(mult);
                       setCustomSpeedMult("");
+                      setMultiplierAndSyncTarget(mult);
                     }}
                     className={`px-2 py-1 rounded border text-xs tabular-nums font-medium ${
                       speedMultiplier === mult && !customSpeedMult
@@ -831,7 +905,7 @@ function TrimEditor({
                     {mult}x
                   </button>
                 ))}
-                <label className="flex items-center gap-1 ml-1 text-slate-400">
+                <label className="flex items-center gap-1 text-slate-400">
                   <input
                     type="text"
                     placeholder="custom"
@@ -841,24 +915,41 @@ function TrimEditor({
                       setCustomSpeedMult(val);
                       const num = parseFloat(val);
                       if (Number.isFinite(num) && num >= 1) {
-                        setSpeedMultiplier(num);
+                        setMultiplierAndSyncTarget(num);
                       }
                     }}
                     className="w-16 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-xs tabular-nums font-mono text-slate-200"
                   />
                   <span>x</span>
                 </label>
+                <span className="text-amber-400 font-mono font-medium text-xs ml-1">
+                  → {fmtTime(effDur)}
+                </span>
               </div>
             )}
 
             {speedMode === "target" && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                {[15, 30, 60].map((tSecs) => (
+                  <button
+                    key={tSecs}
+                    type="button"
+                    onClick={() => setTargetAndSyncMultiplier(String(tSecs))}
+                    className={`px-2 py-1 rounded border text-xs tabular-nums font-medium ${
+                      parseFloat(targetDurationInput) === tSecs
+                        ? "border-amber-500 bg-amber-500/20 text-amber-300"
+                        : "border-slate-700 hover:bg-slate-800 text-slate-300"
+                    }`}
+                  >
+                    {tSecs}s{tSecs === 30 ? " (Status)" : ""}
+                  </button>
+                ))}
                 <label className="flex items-center gap-1.5 text-slate-400">
                   <span>{t("targetDurationLabel")}:</span>
                   <input
                     type="text"
                     value={targetDurationInput}
-                    onChange={(e) => setTargetDurationInput(e.target.value)}
+                    onChange={(e) => setTargetAndSyncMultiplier(e.target.value)}
                     className="w-16 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-xs tabular-nums font-mono text-slate-200"
                   />
                   <span>s</span>
@@ -1034,22 +1125,32 @@ function RangeSlider({
   start,
   end,
   playhead,
-  speedRange,
+  speedRampEnabled = false,
+  speedStart = start,
+  speedEnd = end,
+  speedMultiplier = 2,
   onChange,
+  onSpeedChange,
   onSeek,
   labels,
+  speedLabels = ["Fast forward start", "Fast forward end"],
 }: {
   duration: number;
   start: number;
   end: number;
   playhead?: number | null;
-  speedRange?: SpeedRange | null;
+  speedRampEnabled?: boolean;
+  speedStart?: number;
+  speedEnd?: number;
+  speedMultiplier?: number;
   onChange: (start: number, end: number, moved: "start" | "end") => void;
+  onSpeedChange?: (speedStart: number, speedEnd: number, moved: "start" | "end") => void;
   onSeek?: (t: number) => void;
   labels: [string, string];
+  speedLabels?: [string, string];
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
-  const drag = useRef<"start" | "end" | "seek" | null>(null);
+  const drag = useRef<"start" | "end" | "speedStart" | "speedEnd" | "seek" | null>(null);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [isHovering, setIsHovering] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -1063,22 +1164,47 @@ function RangeSlider({
   }
 
   const pct = (v: number) => (duration > 0 ? (v / duration) * 100 : 0);
-
   function nudge(which: "start" | "end", delta: number) {
     if (which === "start") onChange(Math.min(Math.max(0, start + delta), end - MIN_GAP), end, "start");
     else onChange(start, Math.max(Math.min(duration, end + delta), start + MIN_GAP), "end");
+  }
+
+  function nudgeSpeed(which: "speedStart" | "speedEnd", delta: number) {
+    if (!onSpeedChange) return;
+    if (which === "speedStart") {
+      const next = Math.min(Math.max(start, speedStart + delta), speedEnd - MIN_GAP);
+      onSpeedChange(next, speedEnd, "start");
+    } else {
+      const next = Math.max(Math.min(end, speedEnd + delta), speedStart + MIN_GAP);
+      onSpeedChange(speedStart, next, "end");
+    }
   }
 
   const needleTime = playhead != null ? playhead : isHovering || isDragging ? hoverTime : null;
 
   let tooltipVal: number | null = null;
   let tooltipLeftPct: number = 0;
+  let tooltipColor = "text-[#38bdf8] border-[#38bdf8]/60";
+  let isSpeedTooltip = false;
+
   if (drag.current === "start") {
     tooltipVal = start;
     tooltipLeftPct = pct(start);
+    tooltipColor = "text-emerald-300 border-emerald-500/60";
   } else if (drag.current === "end") {
     tooltipVal = end;
     tooltipLeftPct = pct(end);
+    tooltipColor = "text-emerald-300 border-emerald-500/60";
+  } else if (drag.current === "speedStart") {
+    tooltipVal = speedStart;
+    tooltipLeftPct = pct(speedStart);
+    tooltipColor = "text-amber-300 border-amber-500/60";
+    isSpeedTooltip = true;
+  } else if (drag.current === "speedEnd") {
+    tooltipVal = speedEnd;
+    tooltipLeftPct = pct(speedEnd);
+    tooltipColor = "text-amber-300 border-amber-500/60";
+    isSpeedTooltip = true;
   } else if (drag.current === "seek" || isHovering) {
     tooltipVal = hoverTime ?? playhead ?? 0;
     tooltipLeftPct = pct(tooltipVal);
@@ -1090,14 +1216,13 @@ function RangeSlider({
   return (
     <div
       ref={trackRef}
-      className="relative h-10 select-none touch-none flex items-center cursor-pointer"
+      className="relative h-14 select-none touch-none flex items-center cursor-pointer my-1"
       onPointerEnter={() => setIsHovering(true)}
       onPointerLeave={() => {
         setIsHovering(false);
         if (!drag.current) setHoverTime(null);
       }}
       onPointerDown={(ev) => {
-        // Thumbs stop propagation — a press here is a seek on the timeline.
         drag.current = "seek";
         setIsDragging(true);
         (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
@@ -1109,9 +1234,19 @@ function RangeSlider({
         const v = timeAt(ev.clientX);
         setHoverTime(v);
         if (!drag.current) return;
-        if (drag.current === "seek") onSeek?.(v);
-        else if (drag.current === "start") onChange(Math.min(v, end - MIN_GAP), end, "start");
-        else onChange(start, Math.max(v, start + MIN_GAP), "end");
+        if (drag.current === "seek") {
+          onSeek?.(v);
+        } else if (drag.current === "start") {
+          onChange(Math.min(v, end - MIN_GAP), end, "start");
+        } else if (drag.current === "end") {
+          onChange(start, Math.max(v, start + MIN_GAP), "end");
+        } else if (drag.current === "speedStart" && onSpeedChange) {
+          const clamped = Math.max(start, Math.min(v, speedEnd - MIN_GAP));
+          onSpeedChange(clamped, speedEnd, "start");
+        } else if (drag.current === "speedEnd" && onSpeedChange) {
+          const clamped = Math.min(end, Math.max(v, speedStart + MIN_GAP));
+          onSpeedChange(speedStart, clamped, "end");
+        }
       }}
       onPointerUp={() => {
         drag.current = null;
@@ -1124,7 +1259,7 @@ function RangeSlider({
         setHoverTime(null);
       }}
     >
-      {/* 20px precision track bar */}
+      {/* Center precision track bar */}
       <div className="relative h-5 w-full rounded-md bg-[#1e293b] border border-slate-700/60 overflow-hidden shadow-inner">
         {/* Active trim interval: glowing emerald #10b981 */}
         <div
@@ -1133,19 +1268,19 @@ function RangeSlider({
         />
 
         {/* Speed ramp sub-interval: amber overlay #f59e0b with diagonal stripe pattern */}
-        {speedRange && speedRange.end > speedRange.start && speedRange.speed > 1.0 && (
+        {speedRampEnabled && speedEnd > speedStart && (
           <div
-            className="absolute top-0 bottom-0 bg-[#f59e0b]/85 border-x border-[#f59e0b]"
+            className="absolute top-0 bottom-0 bg-[#f59e0b]/85 border-x-2 border-[#f59e0b]"
             style={{
-              left: `${pct(Math.max(0, speedRange.start))}%`,
+              left: `${pct(Math.max(0, speedStart))}%`,
               width: `${Math.max(
                 0,
-                pct(Math.min(duration, speedRange.end)) - pct(Math.max(0, speedRange.start)),
+                pct(Math.min(duration, speedEnd)) - pct(Math.max(0, speedStart)),
               )}%`,
               backgroundImage:
                 "repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0, 0, 0, 0.35) 4px, rgba(0, 0, 0, 0.35) 8px)",
             }}
-            title={`⚡ ${speedRange.speed.toFixed(1)}x: ${fmtTime(speedRange.start)}–${fmtTime(speedRange.end)}`}
+            title={`⚡ ${speedMultiplier?.toFixed(1) ?? 2}x: ${fmtTime(speedStart)}–${fmtTime(speedEnd)}`}
           />
         )}
       </div>
@@ -1161,14 +1296,17 @@ function RangeSlider({
       {/* Time badge tooltip on hover/drag */}
       {(isHovering || isDragging) && tooltipVal != null && (
         <div
-          className="pointer-events-none absolute -top-7 -translate-x-1/2 rounded bg-slate-900/95 border border-[#38bdf8]/60 px-1.5 py-0.5 text-[10px] font-mono tabular-nums text-[#38bdf8] shadow-lg whitespace-nowrap z-40"
+          className={`pointer-events-none absolute ${
+            isSpeedTooltip ? "-bottom-7" : "-top-7"
+          } -translate-x-1/2 rounded bg-slate-900/95 border px-1.5 py-0.5 text-[10px] font-mono tabular-nums shadow-lg whitespace-nowrap z-40 ${tooltipColor}`}
           style={{ left: `${Math.max(3, Math.min(97, tooltipLeftPct))}%` }}
         >
+          {isSpeedTooltip ? "⚡ " : ""}
           {fmtTime(tooltipVal)}
         </div>
       )}
 
-      {/* Thumbs: Ergonomic handles with accessible hit targets and keyboard arrow nudge support */}
+      {/* Top rail handles: Trim start and end (Emerald #10b981) */}
       {(["start", "end"] as const).map((which, i) => (
         <div
           key={which}
@@ -1188,21 +1326,58 @@ function RangeSlider({
             setIsDragging(false);
           }}
           onKeyDown={(ev) => {
-            // Arrow keys nudge the focused handle: 0.1 s, Shift = 1 s.
             const step = ev.shiftKey ? 1 : 0.1;
             if (ev.key === "ArrowLeft") nudge(which, -step);
             else if (ev.key === "ArrowRight") nudge(which, step);
             else return;
             ev.preventDefault();
           }}
-          className="group absolute top-1/2 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize z-30 flex items-center justify-center h-8 w-6 focus:outline-none"
+          className="group absolute top-1/2 -translate-x-1/2 -translate-y-[88%] cursor-ew-resize z-30 flex flex-col items-center focus:outline-none"
           style={{ left: `${pct(which === "start" ? start : end)}%` }}
         >
-          <div className="h-7 w-3.5 rounded-md bg-emerald-400 border border-white/70 shadow-[0_2px_6px_rgba(0,0,0,0.6)] group-hover:bg-emerald-300 group-hover:scale-105 group-focus:ring-2 group-focus:ring-white transition-all flex items-center justify-center">
-            <div className="h-3 w-0.5 rounded-full bg-emerald-900/60" />
+          <div className="h-6 w-3.5 rounded-t-md rounded-b-xs bg-emerald-400 border border-white/80 shadow-[0_2px_6px_rgba(0,0,0,0.6)] group-hover:bg-emerald-300 group-hover:scale-105 group-focus:ring-2 group-focus:ring-white transition-all flex flex-col items-center justify-center">
+            <div className="h-2.5 w-0.5 rounded-full bg-emerald-900/70" />
           </div>
+          <div className="w-0 h-0 border-l-[3.5px] border-l-transparent border-r-[3.5px] border-r-transparent border-t-[4px] border-t-emerald-400 -mt-px" />
         </div>
       ))}
+
+      {/* Bottom rail handles: Speed start and end (Amber #f59e0b), only when speed ramp is active */}
+      {speedRampEnabled &&
+        (["speedStart", "speedEnd"] as const).map((which, i) => (
+          <div
+            key={which}
+            tabIndex={0}
+            role="slider"
+            aria-label={speedLabels[i]}
+            aria-valuenow={which === "speedStart" ? speedStart : speedEnd}
+            onPointerDown={(ev) => {
+              ev.stopPropagation();
+              drag.current = which;
+              (ev.target as Element).setPointerCapture(ev.pointerId);
+              ev.preventDefault();
+              setIsDragging(true);
+            }}
+            onPointerUp={() => {
+              drag.current = null;
+              setIsDragging(false);
+            }}
+            onKeyDown={(ev) => {
+              const step = ev.shiftKey ? 1 : 0.1;
+              if (ev.key === "ArrowLeft") nudgeSpeed(which, -step);
+              else if (ev.key === "ArrowRight") nudgeSpeed(which, step);
+              else return;
+              ev.preventDefault();
+            }}
+            className="group absolute top-1/2 -translate-x-1/2 translate-y-[20%] cursor-ew-resize z-30 flex flex-col items-center focus:outline-none"
+            style={{ left: `${pct(which === "speedStart" ? speedStart : speedEnd)}%` }}
+          >
+            <div className="w-0 h-0 border-l-[3.5px] border-l-transparent border-r-[3.5px] border-r-transparent border-b-[4px] border-b-amber-400 -mb-px" />
+            <div className="h-6 w-3.5 rounded-b-md rounded-t-xs bg-amber-400 border border-white/80 shadow-[0_2px_6px_rgba(0,0,0,0.6)] group-hover:bg-amber-300 group-hover:scale-105 group-focus:ring-2 group-focus:ring-white transition-all flex flex-col items-center justify-center">
+              <span className="text-[8px] font-black text-amber-950 leading-none select-none">⚡</span>
+            </div>
+          </div>
+        ))}
     </div>
   );
 }
