@@ -92,7 +92,7 @@ export const tauriEngine: Engine = {
         path: f.path,
         duration: f.duration,
         trims: f.trims,
-        speedRange: f.speedRange,
+        speedRanges: f.speedRanges ?? null,
         audio: f.audio === "keep" ? null : f.audio,
         audioSource: f.audioSource === "default" ? null : String(f.audioSource),
         normalize: f.normalize,

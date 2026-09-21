@@ -178,7 +178,7 @@ export default function App() {
           path: f.path,
           duration: f.duration,
           trims: f.trims,
-          speedRange: f.speedRange,
+          speedRanges: f.speedRanges,
           audio: f.audio,
           audioSource: f.audioSource,
           normalize: f.normalize,

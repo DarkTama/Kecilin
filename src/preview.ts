@@ -1,3 +1,4 @@
+import { normalizeSpeedRanges } from "./engine/args";
 import type { SpeedRange } from "./engine/types";
 
 /**
@@ -21,9 +22,28 @@ function usableRange(speedRange: SpeedRange | null, enabled: boolean): SpeedRang
   return speedRange;
 }
 
+/** Accepts the single-range or the list form and keeps only the useful ones. */
+function usableRanges(
+  speedRange: SpeedRange | readonly SpeedRange[] | null,
+  enabled: boolean,
+): SpeedRange[] {
+  if (!enabled || !speedRange) return [];
+  const list = Array.isArray(speedRange) ? speedRange : [speedRange as SpeedRange];
+  return list.filter((r): r is SpeedRange => usableRange(r, true) != null);
+}
+
 /** True when `time` sits in [start, end) of the range. */
 function inRange(time: number, speedRange: SpeedRange): boolean {
   return time >= speedRange.start && time < speedRange.end;
+}
+
+/** The range covering `time`, or null when the playhead is in normal speed. */
+function rangeAt(
+  time: number,
+  speedRange: SpeedRange | readonly SpeedRange[] | null,
+  enabled: boolean,
+): SpeedRange | null {
+  return usableRanges(speedRange, enabled).find((r) => inRange(time, r)) ?? null;
 }
 
 /**
@@ -34,22 +54,26 @@ function inRange(time: number, speedRange: SpeedRange): boolean {
  */
 export function resolvePlaybackRate(
   time: number,
-  speedRange: SpeedRange | null,
+  speedRange: SpeedRange | readonly SpeedRange[] | null,
   enabled: boolean,
 ): number {
-  const range = usableRange(speedRange, enabled);
-  if (!range || !inRange(time, range)) return 1;
+  const range = rangeAt(time, speedRange, enabled);
+  if (!range) return 1;
   return Math.min(range.speed, MAX_PREVIEW_RATE);
 }
 
-/** True when the preview should be muted at `time`. */
+/**
+ * True when the preview should be muted at `time`.
+ *
+ * Only about preview comfort — the encoder keeps the sped-up audio either way.
+ */
 export function shouldMutePreview(
   time: number,
-  speedRange: SpeedRange | null,
+  speedRange: SpeedRange | readonly SpeedRange[] | null,
   enabled: boolean,
 ): boolean {
-  const range = usableRange(speedRange, enabled);
-  if (!range || !inRange(time, range)) return false;
+  const range = rangeAt(time, speedRange, enabled);
+  if (!range) return false;
   return range.speed > MUTE_ABOVE_RATE;
 }
 
@@ -65,13 +89,14 @@ export type OutputSegment = {
  * Describes the rendered output as a list of consecutive segments, so the UI
  * can draw a to-scale strip of what the result will look like.
  *
- * Mirrors `calculateEffectiveDuration`: the segment durations always sum to
- * the same effective duration the encoder will produce.
+ * With N speed ranges the strip alternates normal and sped segments, matching
+ * the filtergraph. Mirrors `calculateEffectiveDuration`: the segment durations
+ * always sum to the same effective duration the encoder will produce.
  */
 export function buildOutputSegments(
   totalDuration: number,
   trim: { start: number; end: number } | null,
-  speedRange: SpeedRange | null,
+  speedRange: SpeedRange | readonly SpeedRange[] | null,
 ): OutputSegment[] {
   const tStart = trim?.start ?? 0;
   const tEnd = trim?.end ?? totalDuration;
@@ -85,17 +110,22 @@ export function buildOutputSegments(
       .map((p) => ({ ...p, fraction: total > 0 ? p.outputDuration / total : 0 }));
   };
 
-  const range = usableRange(speedRange, true);
-  if (!range) {
+  const ranges = normalizeSpeedRanges(
+    speedRange == null ? [] : Array.isArray(speedRange) ? speedRange : [speedRange as SpeedRange],
+    trim,
+    totalDuration,
+  );
+  if (ranges.length === 0) {
     return withFractions([{ kind: "normal", outputDuration: trimmed }]);
   }
 
-  const sStart = Math.max(tStart, Math.min(tEnd, range.start));
-  const sEnd = Math.max(sStart, Math.min(tEnd, range.end));
-
-  return withFractions([
-    { kind: "normal", outputDuration: sStart - tStart },
-    { kind: "sped", outputDuration: (sEnd - sStart) / range.speed },
-    { kind: "normal", outputDuration: tEnd - sEnd },
-  ]);
+  const parts: Array<{ kind: OutputSegment["kind"]; outputDuration: number }> = [];
+  let cursor = tStart;
+  for (const r of ranges) {
+    parts.push({ kind: "normal", outputDuration: r.start - cursor });
+    parts.push({ kind: "sped", outputDuration: (r.end - r.start) / r.speed });
+    cursor = r.end;
+  }
+  parts.push({ kind: "normal", outputDuration: tEnd - cursor });
+  return withFractions(parts);
 }

@@ -217,3 +217,79 @@ describe("buildOutputSegments agrees with calculateEffectiveDuration", () => {
     expect(summed).toBeCloseTo(calculateEffectiveDuration(total, trim, speedRange), 6);
   });
 });
+
+describe("multiple speed ranges", () => {
+  const two = [range(10, 20, 2), range(30, 40, 4)];
+
+  it("picks the range covering the playhead", () => {
+    expect(resolvePlaybackRate(15, two, true)).toBe(2);
+    expect(resolvePlaybackRate(35, two, true)).toBe(4);
+  });
+
+  it("runs at 1x in the gap between ranges", () => {
+    expect(resolvePlaybackRate(25, two, true)).toBe(1);
+  });
+
+  it("runs at 1x before the first and after the last range", () => {
+    expect(resolvePlaybackRate(5, two, true)).toBe(1);
+    expect(resolvePlaybackRate(45, two, true)).toBe(1);
+  });
+
+  it("mutes only inside the range that exceeds the threshold", () => {
+    expect(shouldMutePreview(15, two, true)).toBe(false);
+    expect(shouldMutePreview(35, two, true)).toBe(false);
+    expect(shouldMutePreview(35, [range(10, 20, 2), range(30, 40, 8)], true)).toBe(true);
+  });
+
+  it("draws five segments for two ranges inside a trim", () => {
+    const segs = buildOutputSegments(60, { start: 0, end: 60 }, two);
+    expect(segs.map((s) => s.kind)).toEqual(["normal", "sped", "normal", "sped", "normal"]);
+  });
+
+  it("draws four segments when a range is flush with the trim start", () => {
+    const segs = buildOutputSegments(60, { start: 10, end: 60 }, two);
+    expect(segs.map((s) => s.kind)).toEqual(["sped", "normal", "sped", "normal"]);
+  });
+
+  it("totals the savings of every range", () => {
+    const segs = buildOutputSegments(60, { start: 0, end: 60 }, two);
+    const total = segs.reduce((acc, s) => acc + s.outputDuration, 0);
+    // 60 - (10 - 10/2) - (10 - 10/4) = 60 - 5 - 7.5
+    expect(total).toBeCloseTo(47.5, 6);
+  });
+
+  it("agrees with calculateEffectiveDuration", () => {
+    const segs = buildOutputSegments(60, { start: 0, end: 60 }, two);
+    const total = segs.reduce((acc, s) => acc + s.outputDuration, 0);
+    expect(total).toBeCloseTo(calculateEffectiveDuration(60, { start: 0, end: 60 }, two), 6);
+  });
+
+  it("does not double-count overlapping ranges", () => {
+    const overlapping = [range(10, 30, 2), range(20, 40, 2)];
+    const segs = buildOutputSegments(60, { start: 0, end: 60 }, overlapping);
+    const total = segs.reduce((acc, s) => acc + s.outputDuration, 0);
+    // The second range is clamped to [30, 40]: 30s sped at 2x saves 15s.
+    expect(total).toBeCloseTo(45, 6);
+    expect(total).toBeCloseTo(calculateEffectiveDuration(60, { start: 0, end: 60 }, overlapping), 6);
+  });
+
+  it("accepts ranges given out of order", () => {
+    const reversed = [range(30, 40, 4), range(10, 20, 2)];
+    const segs = buildOutputSegments(60, { start: 0, end: 60 }, reversed);
+    expect(segs.map((s) => s.kind)).toEqual(["normal", "sped", "normal", "sped", "normal"]);
+    expect(segs[1].outputDuration).toBeCloseTo(5, 6);
+    expect(segs[3].outputDuration).toBeCloseTo(2.5, 6);
+  });
+
+  it("ignores an empty list", () => {
+    expect(resolvePlaybackRate(15, [], true)).toBe(1);
+    expect(buildOutputSegments(60, { start: 0, end: 60 }, [])).toEqual([
+      { kind: "normal", outputDuration: 60, fraction: 1 },
+    ]);
+  });
+
+  it("drops ranges the trim excludes", () => {
+    const segs = buildOutputSegments(60, { start: 0, end: 25 }, two);
+    expect(segs.map((s) => s.kind)).toEqual(["normal", "sped", "normal"]);
+  });
+});

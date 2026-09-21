@@ -26,7 +26,10 @@ export type BatchItemSpec = {
   path: string;
   duration: number | null;
   trims: Trim[];
+  /** @deprecated single-range form, kept so older callers keep working. */
   speedRange?: SpeedRange | null;
+  /** Zero or more non-overlapping speed ranges inside the trim. */
+  speedRanges?: SpeedRange[] | null;
   audio: AudioOpt;
   audioSource: AudioSource;
   normalize: boolean;

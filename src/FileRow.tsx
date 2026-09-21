@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { engine } from "./engine";
-import { calculateEffectiveDuration, outputName, solveSpeedMultiplier } from "./engine/args";
+import {
+  calculateEffectiveDuration,
+  normalizeSpeedRanges as argsNormalizeSpeedRanges,
+  outputName,
+  solveSpeedMultiplier,
+} from "./engine/args";
 import { fmtSize, fmtTime, parseTime } from "./format";
 import { useT } from "./i18n";
 import {
@@ -91,8 +96,11 @@ export function FileRow({
     ) : null;
 
   const speedBadge =
-    file.speedRange && file.speedRange.speed > 1.0 ? (
-      <span className="text-amber-400"> · ⚡ {file.speedRange.speed.toFixed(1)}x</span>
+    (file.speedRanges ?? []).length > 0 ? (
+      <span className="text-amber-400">
+        {" "}
+        · ⚡ {file.speedRanges.map((r) => `${r.speed.toFixed(1)}x`).join(" + ")}
+      </span>
     ) : null;
 
   const audioNotes = [
@@ -236,7 +244,7 @@ function TrimEditor({
   const setAudio = useStore((st) => st.setAudio);
   const setAudioSource = useStore((st) => st.setAudioSource);
   const setNormalize = useStore((st) => st.setNormalize);
-  const setSpeedRange = useStore((st) => st.setSpeedRange);
+  const setSpeedRanges = useStore((st) => st.setSpeedRanges);
   const setTrimCustomName = useStore((st) => st.setTrimCustomName);
   const lastCustomLen = useStore((st) => st.lastCustomLen);
   const setLastCustomLen = useStore((st) => st.setLastCustomLen);
@@ -297,24 +305,51 @@ function TrimEditor({
     file.trims[0]?.customName ?? "",
   );
 
-  // Speed Ramp state
-  const [speedRampEnabled, setSpeedRampEnabled] = useState<boolean>(file.speedRange != null);
-  const [speedStart, setSpeedStart] = useState<number>(file.speedRange?.start ?? initStart);
-  const [speedEnd, setSpeedEnd] = useState<number>(file.speedRange?.end ?? initEnd);
-  const [speedStartText, setSpeedStartText] = useState<string>(fmtTime(file.speedRange?.start ?? initStart));
-  const [speedEndText, setSpeedEndText] = useState<string>(fmtTime(file.speedRange?.end ?? initEnd));
-  const [speedMode, setSpeedMode] = useState<"fixed" | "target">(
-    file.speedRange?.fitTarget ? "target" : "fixed",
+  // ---- Speed ramp (fast forward) state --------------------------------------
+  // `ranges` below is the trim list; this is the list of fast-forward windows
+  // inside the current trim. Each entry carries its own speed and target, so
+  // two ranges can run at different multipliers.
+  type SpeedDraft = {
+    id: number;
+    start: number;
+    end: number;
+    startText: string;
+    endText: string;
+    mode: "fixed" | "target";
+    multiplier: number;
+    customMult: string;
+    targetText: string;
+  };
+
+  const nextSpeedId = useRef(1);
+  const makeDraft = (s: number, e: number, seed?: Partial<SpeedDraft>): SpeedDraft => ({
+    id: nextSpeedId.current++,
+    start: s,
+    end: e,
+    startText: fmtTime(s),
+    endText: fmtTime(e),
+    mode: "fixed",
+    multiplier: 2,
+    customMult: "",
+    targetText: "30",
+    ...seed,
+  });
+
+  const [speedDrafts, setSpeedDrafts] = useState<SpeedDraft[]>(() =>
+    (file.speedRanges ?? []).map((r) =>
+      makeDraft(r.start, r.end, {
+        mode: r.fitTarget ? "target" : "fixed",
+        multiplier: r.speed,
+        customMult: ![1.5, 2, 4, 8].includes(r.speed) ? String(r.speed) : "",
+        targetText: r.targetDuration ? String(r.targetDuration) : "30",
+      }),
+    ),
   );
-  const [speedMultiplier, setSpeedMultiplier] = useState<number>(file.speedRange?.speed ?? 2);
-  const [customSpeedMult, setCustomSpeedMult] = useState<string>(
-    file.speedRange?.speed && ![1.5, 2, 4, 8].includes(file.speedRange.speed)
-      ? String(file.speedRange.speed)
-      : "",
+  const [speedRampEnabled, setSpeedRampEnabled] = useState<boolean>(
+    (file.speedRanges ?? []).length > 0,
   );
-  const [targetDurationInput, setTargetDurationInput] = useState<string>(
-    file.speedRange?.targetDuration ? String(file.speedRange.targetDuration) : "30",
-  );
+  /** Which range the four-marker rail is currently editing. */
+  const [activeSpeedIdx, setActiveSpeedIdx] = useState(0);
 
   const showVideo = preview === "native" || preview === "proxy";
   const customSecs = parseFloat(customLen);
@@ -350,19 +385,17 @@ function TrimEditor({
     setStartText(fmtTime(ns));
     setEndText(fmtTime(ne));
 
-    // Strictly clamp speed range inside new trim [ns, ne]
-    if (speedRampEnabled) {
-      setSpeedStart((curSs) => {
-        const nextSs = Math.max(ns, Math.min(ne - 0.1, curSs));
-        setSpeedStartText(fmtTime(nextSs));
-        return nextSs;
-      });
-      setSpeedEnd((curSe) => {
-        const nextSe = Math.min(ne, Math.max(ns + 0.1, curSe));
-        setSpeedEndText(fmtTime(nextSe));
-        return nextSe;
-      });
-    }
+    // Keep every fast-forward window inside the new trim [ns, ne], and drop
+    // any that the trim squeezed out of existence.
+    setSpeedDrafts((cur) =>
+      cur
+        .map((d) => {
+          const s = Math.max(ns, Math.min(ne - MIN_GAP, d.start));
+          const e = Math.min(ne, Math.max(s + MIN_GAP, d.end));
+          return { ...d, start: s, end: e, startText: fmtTime(s), endText: fmtTime(e) };
+        })
+        .filter((d) => d.end > d.start + 0.05),
+    );
 
     const v = videoRef.current;
     if (v && scrubTo != null && showVideo) v.currentTime = scrubTo;
@@ -384,63 +417,94 @@ function TrimEditor({
     }
   }
 
-  function handleSpeedRange(ns: number, ne: number, moved: "start" | "end") {
-    // Strictly clamp within trim boundaries [start, end]
-    const clampedStart = Math.max(start, Math.min(end - 0.1, ns));
-    const clampedEnd = Math.min(end, Math.max(start + 0.1, ne));
-    setSpeedStart(clampedStart);
-    setSpeedEnd(clampedEnd);
-    setSpeedStartText(fmtTime(clampedStart));
-    setSpeedEndText(fmtTime(clampedEnd));
+  /** Bounds a range may occupy: the trim, minus whatever its neighbours hold. */
+  function speedBounds(idx: number, list: SpeedDraft[] = speedDrafts) {
+    const prev = list[idx - 1];
+    const next = list[idx + 1];
+    return {
+      lo: prev ? Math.max(start, prev.end) : start,
+      hi: next ? Math.min(end, next.start) : end,
+    };
+  }
 
+  /** Recomputes one draft's speed/target pair after its window changed. */
+  function syncDraft(d: SpeedDraft): SpeedDraft {
     const totalDur = duration ?? end;
-    if (speedMode === "target") {
-      const targetVal = parseFloat(targetDurationInput) || 30;
-      const solved = solveSpeedMultiplier(targetVal, totalDur, { start, end }, clampedStart, clampedEnd);
-      setSpeedMultiplier(Number(solved.toFixed(2)));
-      setCustomSpeedMult(Number(solved.toFixed(2)).toString());
-    } else {
-      const outDur = calculateEffectiveDuration(totalDur, { start, end }, {
-        start: clampedStart,
-        end: clampedEnd,
-        speed: speedMultiplier,
-        fitTarget: false,
-      });
-      setTargetDurationInput(outDur.toFixed(1));
+    if (d.mode === "target") {
+      const targetVal = parseFloat(d.targetText) || 30;
+      const solved = Number(
+        solveSpeedMultiplier(targetVal, totalDur, { start, end }, d.start, d.end).toFixed(2),
+      );
+      return { ...d, multiplier: solved, customMult: String(solved) };
     }
+    const outDur = calculateEffectiveDuration(totalDur, { start, end }, [
+      { start: d.start, end: d.end, speed: d.multiplier, fitTarget: false },
+    ]);
+    return { ...d, targetText: outDur.toFixed(1) };
+  }
+
+  function patchDraft(idx: number, patch: (d: SpeedDraft) => SpeedDraft) {
+    setSpeedDrafts((cur) => cur.map((d, i) => (i === idx ? patch(d) : d)));
+  }
+
+  function handleSpeedRange(ns: number, ne: number, moved: "start" | "end", idx = activeSpeedIdx) {
+    const d = speedDrafts[idx];
+    if (!d) return;
+    const { lo, hi } = speedBounds(idx);
+    const s = Math.max(lo, Math.min(hi - MIN_GAP, ns));
+    const e = Math.min(hi, Math.max(s + MIN_GAP, ne));
+    patchDraft(idx, (cur) =>
+      syncDraft({ ...cur, start: s, end: e, startText: fmtTime(s), endText: fmtTime(e) }),
+    );
 
     const v = videoRef.current;
     if (v && showVideo) {
-      const scrub = moved === "start" ? clampedStart : clampedEnd;
+      const scrub = moved === "start" ? s : e;
       v.currentTime = scrub;
       setPlayhead(scrub);
     }
   }
 
-  function setMultiplierAndSyncTarget(mult: number) {
-    setSpeedMultiplier(mult);
-    setSpeedMode("fixed");
-    const totalDur = duration ?? end;
-    const outDur = calculateEffectiveDuration(totalDur, { start, end }, {
-      start: speedStart,
-      end: speedEnd,
-      speed: mult,
-      fitTarget: false,
-    });
-    setTargetDurationInput(outDur.toFixed(1));
+  function setMultiplierAndSyncTarget(idx: number, mult: number) {
+    patchDraft(idx, (cur) => syncDraft({ ...cur, mode: "fixed", multiplier: mult }));
   }
 
-  function setTargetAndSyncMultiplier(targetStr: string) {
-    setTargetDurationInput(targetStr);
-    setSpeedMode("target");
-    const targetVal = parseFloat(targetStr);
-    if (Number.isFinite(targetVal) && targetVal > 0) {
-      const totalDur = duration ?? end;
-      const solved = solveSpeedMultiplier(targetVal, totalDur, { start, end }, speedStart, speedEnd);
-      const rounded = Number(solved.toFixed(2));
-      setSpeedMultiplier(rounded);
-      setCustomSpeedMult(rounded.toString());
-    }
+  function setTargetAndSyncMultiplier(idx: number, targetStr: string) {
+    patchDraft(idx, (cur) => syncDraft({ ...cur, mode: "target", targetText: targetStr }));
+  }
+
+  /** Drops a new range into the widest free gap inside the trim. */
+  function addSpeedRange() {
+    setSpeedDrafts((cur) => {
+      const sorted = [...cur].sort((a, b) => a.start - b.start);
+      // Every gap between existing ranges, plus head and tail.
+      const gaps: Array<{ from: number; to: number }> = [];
+      let cursor = start;
+      for (const d of sorted) {
+        if (d.start > cursor) gaps.push({ from: cursor, to: d.start });
+        cursor = Math.max(cursor, d.end);
+      }
+      if (end > cursor) gaps.push({ from: cursor, to: end });
+
+      const widest = gaps.reduce<{ from: number; to: number } | null>(
+        (best, g) => (best == null || g.to - g.from > best.to - best.from ? g : best),
+        null,
+      );
+      if (!widest || widest.to - widest.from < MIN_GAP * 2) return cur;
+
+      // Take the middle half of the gap so both edges stay draggable.
+      const span = widest.to - widest.from;
+      const s = widest.from + span * 0.25;
+      const e = widest.from + span * 0.75;
+      const next = [...sorted, makeDraft(s, e)].sort((a, b) => a.start - b.start);
+      setActiveSpeedIdx(next.findIndex((d) => d.start === s));
+      return next;
+    });
+  }
+
+  function removeSpeedRange(idx: number) {
+    setSpeedDrafts((cur) => cur.filter((_, i) => i !== idx));
+    setActiveSpeedIdx((cur) => Math.max(0, cur > idx ? cur - 1 : cur));
   }
 
   function commitText(which: "start" | "end", text: string) {
@@ -455,18 +519,20 @@ function TrimEditor({
     else handleRange(start, Math.min(Math.max(v, start + 0.1), max), "end");
   }
 
-  function commitSpeedText(which: "start" | "end", text: string) {
+  function commitSpeedText(idx: number, which: "start" | "end", text: string) {
+    const d = speedDrafts[idx];
+    if (!d) return;
     const v = parseTime(text);
     if (v == null) {
-      setSpeedStartText(fmtTime(speedStart));
-      setSpeedEndText(fmtTime(speedEnd));
+      patchDraft(idx, (cur) => ({
+        ...cur,
+        startText: fmtTime(cur.start),
+        endText: fmtTime(cur.end),
+      }));
       return;
     }
-    if (which === "start") {
-      handleSpeedRange(v, speedEnd, "start");
-    } else {
-      handleSpeedRange(speedStart, v, "end");
-    }
+    if (which === "start") handleSpeedRange(v, d.end, "start", idx);
+    else handleSpeedRange(d.start, v, "end", idx);
   }
 
   function commitCustomLen(valStr: string) {
@@ -534,52 +600,48 @@ function TrimEditor({
           : { start, end }
         : null;
 
-  const targetSeconds = parseFloat(targetDurationInput) || 30;
-
-  const effectiveSpeed: number =
-    speedMode === "target"
-      ? Number(
-          solveSpeedMultiplier(
-            targetSeconds,
-            duration ?? end,
-            activeTrim,
-            speedStart,
-            speedEnd,
-          ).toFixed(2),
-        )
-      : speedMultiplier;
-
-  const currentSpeedRange: SpeedRange | null = speedRampEnabled
-    ? {
-        start: speedStart,
-        end: speedEnd,
-        speed: effectiveSpeed,
-        fitTarget: speedMode === "target",
-        targetDuration: speedMode === "target" ? targetSeconds : undefined,
-      }
-    : null;
+  /** Drafts turned into the shape the engine consumes, ordered and clamped. */
+  const currentSpeedRanges: SpeedRange[] = speedRampEnabled
+    ? argsNormalizeSpeedRanges(
+        speedDrafts.map((d) => ({
+          start: d.start,
+          end: d.end,
+          speed: d.multiplier,
+          fitTarget: d.mode === "target",
+          targetDuration: d.mode === "target" ? parseFloat(d.targetText) || 30 : undefined,
+        })),
+        activeTrim,
+        duration ?? end,
+      )
+    : [];
 
   const totalDur = duration ?? end;
   const origDur = activeTrim ? activeTrim.end - activeTrim.start : totalDur;
-  const effDur = calculateEffectiveDuration(totalDur, activeTrim, currentSpeedRange);
+  const effDur = calculateEffectiveDuration(totalDur, activeTrim, currentSpeedRanges);
   const savedSecs = Math.max(0, origDur - effDur);
 
   // ---- Fast-forward preview -------------------------------------------------
   // A to-scale picture of the rendered result, and a live playbackRate ramp so
   // the preview element actually speeds up inside the marked range.
-  const outputSegments = buildOutputSegments(totalDur, activeTrim, currentSpeedRange);
-  const previewCapped = speedRampEnabled && effectiveSpeed > MAX_PREVIEW_RATE;
+  const outputSegments = buildOutputSegments(totalDur, activeTrim, currentSpeedRanges);
+  const fastestSpeed = currentSpeedRanges.reduce((m, r) => Math.max(m, r.speed), 0);
+  const previewCapped = speedRampEnabled && fastestSpeed > MAX_PREVIEW_RATE;
 
   // Rate actually applied to the element, reported by the rAF loop. Driving the
   // badge from `playhead` instead would lag by up to a timeupdate tick, which
   // is seconds of media time once the rate is high.
   const [liveRate, setLiveRate] = useState(1);
 
+  // Sped-up audio is kept in the rendered file; this only silences the preview
+  // while the playhead is inside a fast range. Off by default so what you hear
+  // is what you get.
+  const [previewMuted, setPreviewMuted] = useState(false);
+
   // The loop reads its inputs through a ref so that dragging a speed handle
   // retunes the running loop instead of tearing it down and rebuilding it on
   // every pointer move.
-  const rampRef = useRef({ range: currentSpeedRange, trimEnd: end });
-  rampRef.current = { range: currentSpeedRange, trimEnd: end };
+  const rampRef = useRef({ ranges: currentSpeedRanges, trimEnd: end });
+  rampRef.current = { ranges: currentSpeedRanges, trimEnd: end };
 
   // Drive playbackRate from rAF, not onTimeUpdate: that event fires about four
   // times a second, which overshoots the range boundary badly at high rates.
@@ -598,11 +660,12 @@ function TrimEditor({
     const tick = () => {
       const el = videoRef.current;
       if (el) {
-        const { range, trimEnd } = rampRef.current;
-        const rate = resolvePlaybackRate(el.currentTime, range, true);
+        const { ranges: liveRanges, trimEnd } = rampRef.current;
+        const rate = resolvePlaybackRate(el.currentTime, liveRanges, true);
         if (el.playbackRate !== rate) el.playbackRate = rate;
         setLiveRate(rate);
-        const mute = userMuted || shouldMutePreview(el.currentTime, range, true);
+        const mute =
+          userMuted || (previewMuted && shouldMutePreview(el.currentTime, liveRanges, true));
         if (el.muted !== mute) el.muted = mute;
         // The `onTimeUpdate` auto-pause cannot see the trim end at high rates:
         // one tick advances 0.25 * rate seconds of media. Stop it here instead.
@@ -622,7 +685,7 @@ function TrimEditor({
       }
       setLiveRate(1);
     };
-  }, [showVideo, playing, speedRampEnabled]);
+  }, [showVideo, playing, speedRampEnabled, previewMuted]);
 
   function apply() {
     let out = ranges;
@@ -635,15 +698,16 @@ function TrimEditor({
       out = full ? [] : [{ start, end, customName: singleCustomName.trim() || undefined }];
     }
     setTrims(file.path, out);
-    setSpeedRange(file.path, currentSpeedRange);
+    setSpeedRanges(file.path, currentSpeedRanges);
     handleClose();
   }
 
   function clearAll() {
     setTrims(file.path, []);
-    setSpeedRange(index, null);
+    setSpeedRanges(file.path, []);
     setSingleCustomName("");
     setSpeedRampEnabled(false);
+    setSpeedDrafts([]);
     handleClose();
   }
 
@@ -689,10 +753,6 @@ function TrimEditor({
               if (Number.isFinite(v.duration)) {
                 setDuration((d) => d ?? v.duration);
                 if (end <= 0) update(start, v.duration);
-                if (speedEnd <= 0) {
-                  setSpeedEnd(v.duration);
-                  setSpeedEndText(fmtTime(v.duration));
-                }
               }
               // Audio decodes but the video track can't: no error fires and
               // videoWidth stays 0 — switch to the ffmpeg proxy.
@@ -710,15 +770,23 @@ function TrimEditor({
             }}
           />
           {liveRate > 1 && (
-            <div className="pointer-events-none absolute right-2 top-2 flex flex-col items-end gap-1">
-              <span className="rounded-full bg-amber-500/90 px-2 py-0.5 text-xs font-semibold text-slate-950 shadow-lg">
+            <div className="absolute right-2 top-2 flex flex-col items-end gap-1">
+              <span className="pointer-events-none rounded-full bg-amber-500/90 px-2 py-0.5 text-xs font-semibold text-slate-950 shadow-lg">
                 ⚡ {liveRate.toFixed(2)}×
               </span>
               {previewCapped && (
-                <span className="rounded bg-slate-950/85 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
+                <span className="pointer-events-none rounded bg-slate-950/85 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
                   {t("previewCapped", { max: String(MAX_PREVIEW_RATE) })}
                 </span>
               )}
+              <button
+                type="button"
+                onClick={() => setPreviewMuted((m) => !m)}
+                title={t(previewMuted ? "previewAudioMuted" : "previewAudioOn")}
+                className="rounded bg-slate-950/85 px-1.5 py-0.5 text-[10px] font-medium text-slate-300 hover:text-white"
+              >
+                {previewMuted ? "🔇" : "🔊"}
+              </button>
             </div>
           )}
         </div>
@@ -868,11 +936,15 @@ function TrimEditor({
           end={end}
           playhead={showVideo ? playhead : null}
           speedRampEnabled={speedRampEnabled}
-          speedStart={speedStart}
-          speedEnd={speedEnd}
-          speedMultiplier={effectiveSpeed}
+          speedRanges={speedDrafts.map((d) => ({
+            start: d.start,
+            end: d.end,
+            speed: d.multiplier,
+          }))}
+          activeSpeedIdx={activeSpeedIdx}
           onChange={handleRange}
           onSpeedChange={handleSpeedRange}
+          onSelectSpeed={setActiveSpeedIdx}
           onSeek={(tt) => {
             const v = videoRef.current;
             if (v && showVideo) {
@@ -903,7 +975,7 @@ function TrimEditor({
             {outputSegments.map((seg, i) => (
               <div
                 key={i}
-                title={`${seg.kind === "sped" ? `${effectiveSpeed.toFixed(2)}×` : "1×"} · ${fmtTime(seg.outputDuration)}`}
+                title={`${seg.kind === "sped" ? "⚡" : "1×"} · ${fmtTime(seg.outputDuration)}`}
                 // minWidth keeps a very short segment from rendering sub-pixel
                 // and disappearing; flexShrink lets the row still fit exactly.
                 style={{ width: `${seg.fraction * 100}%`, minWidth: "3px" }}
@@ -928,13 +1000,11 @@ function TrimEditor({
               onChange={(e) => {
                 const checked = e.target.checked;
                 setSpeedRampEnabled(checked);
-                if (checked) {
-                  const s = start;
+                // Turning it on with no ranges yet seeds one over the whole trim.
+                if (checked && speedDrafts.length === 0) {
                   const eVal = end > start ? end : (duration ?? 0);
-                  setSpeedStart(s);
-                  setSpeedEnd(eVal);
-                  setSpeedStartText(fmtTime(s));
-                  setSpeedEndText(fmtTime(eVal));
+                  setSpeedDrafts([makeDraft(start, eVal)]);
+                  setActiveSpeedIdx(0);
                 }
               }}
               className="accent-amber-500 rounded"
@@ -954,127 +1024,157 @@ function TrimEditor({
         </div>
 
         {speedRampEnabled && (
-          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300 pt-1 border-t border-slate-800/80">
-            <label className="flex items-center gap-1.5">
-              <span>{t("from")}</span>
-              <input
-                value={speedStartText}
-                onChange={(e) => setSpeedStartText(e.target.value)}
-                onBlur={(e) => commitSpeedText("start", e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && commitSpeedText("start", speedStartText)}
-                className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
-              />
-            </label>
-
-            <label className="flex items-center gap-1.5">
-              <span>{t("to")}</span>
-              <input
-                value={speedEndText}
-                onChange={(e) => setSpeedEndText(e.target.value)}
-                onBlur={(e) => commitSpeedText("end", e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && commitSpeedText("end", speedEndText)}
-                className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
-              />
-            </label>
-
-            <div className="flex items-center gap-1 bg-slate-900 rounded-md p-0.5 border border-slate-800">
-              <button
-                type="button"
-                onClick={() => setSpeedMode("fixed")}
-                className={`px-2 py-1 rounded text-xs transition-colors ${
-                  speedMode === "fixed"
-                    ? "bg-amber-500 text-slate-950 font-semibold shadow"
-                    : "text-slate-400 hover:text-white"
+          <div className="flex flex-col gap-2 pt-1 border-t border-slate-800/80">
+            {speedDrafts.map((d, idx) => (
+              <div
+                key={d.id}
+                onPointerDown={() => setActiveSpeedIdx(idx)}
+                className={`flex flex-wrap items-center gap-3 rounded-md border p-2 text-xs text-slate-300 transition-colors ${
+                  idx === activeSpeedIdx
+                    ? "border-amber-500/60 bg-amber-500/5"
+                    : "border-slate-800 hover:border-slate-700"
                 }`}
               >
-                {t("speedMultiplier")}
-              </button>
-              <button
-                type="button"
-                onClick={() => setSpeedMode("target")}
-                className={`px-2 py-1 rounded text-xs transition-colors ${
-                  speedMode === "target"
-                    ? "bg-amber-500 text-slate-950 font-semibold shadow"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                {t("fitTargetDuration")}
-              </button>
-            </div>
+                <span className="font-semibold text-amber-400">⚡{idx + 1}</span>
 
-            {speedMode === "fixed" && (
-              <div className="flex items-center gap-1.5">
-                {[1.5, 2, 4, 8].map((mult) => (
+                <label className="flex items-center gap-1.5">
+                  <span>{t("from")}</span>
+                  <input
+                    value={d.startText}
+                    onChange={(e) =>
+                      patchDraft(idx, (cur) => ({ ...cur, startText: e.target.value }))
+                    }
+                    onBlur={(e) => commitSpeedText(idx, "start", e.target.value)}
+                    onKeyDown={(e) =>
+                      e.key === "Enter" && commitSpeedText(idx, "start", d.startText)
+                    }
+                    className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
+                  />
+                </label>
+
+                <label className="flex items-center gap-1.5">
+                  <span>{t("to")}</span>
+                  <input
+                    value={d.endText}
+                    onChange={(e) => patchDraft(idx, (cur) => ({ ...cur, endText: e.target.value }))}
+                    onBlur={(e) => commitSpeedText(idx, "end", e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && commitSpeedText(idx, "end", d.endText)}
+                    className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
+                  />
+                </label>
+
+                <div className="flex items-center gap-1 bg-slate-900 rounded-md p-0.5 border border-slate-800">
                   <button
-                    key={mult}
                     type="button"
-                    onClick={() => {
-                      setCustomSpeedMult("");
-                      setMultiplierAndSyncTarget(mult);
-                    }}
-                    className={`px-2 py-1 rounded border text-xs tabular-nums font-medium ${
-                      speedMultiplier === mult && !customSpeedMult
-                        ? "border-amber-500 bg-amber-500/20 text-amber-300"
-                        : "border-slate-700 hover:bg-slate-800 text-slate-300"
+                    onClick={() => patchDraft(idx, (cur) => syncDraft({ ...cur, mode: "fixed" }))}
+                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                      d.mode === "fixed"
+                        ? "bg-amber-500 text-slate-950 font-semibold shadow"
+                        : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    {mult}x
+                    {t("speedMultiplier")}
                   </button>
-                ))}
-                <label className="flex items-center gap-1 text-slate-400">
-                  <input
-                    type="text"
-                    placeholder="custom"
-                    value={customSpeedMult}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setCustomSpeedMult(val);
-                      const num = parseFloat(val);
-                      if (Number.isFinite(num) && num >= 1) {
-                        setMultiplierAndSyncTarget(num);
-                      }
-                    }}
-                    className="w-16 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-xs tabular-nums font-mono text-slate-200"
-                  />
-                  <span>x</span>
-                </label>
-                <span className="text-amber-400 font-mono font-medium text-xs ml-1">
-                  → {fmtTime(effDur)}
-                </span>
-              </div>
-            )}
-
-            {speedMode === "target" && (
-              <div className="flex items-center gap-1.5">
-                {[15, 30, 60].map((tSecs) => (
                   <button
-                    key={tSecs}
                     type="button"
-                    onClick={() => setTargetAndSyncMultiplier(String(tSecs))}
-                    className={`px-2 py-1 rounded border text-xs tabular-nums font-medium ${
-                      parseFloat(targetDurationInput) === tSecs
-                        ? "border-amber-500 bg-amber-500/20 text-amber-300"
-                        : "border-slate-700 hover:bg-slate-800 text-slate-300"
+                    onClick={() => patchDraft(idx, (cur) => syncDraft({ ...cur, mode: "target" }))}
+                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                      d.mode === "target"
+                        ? "bg-amber-500 text-slate-950 font-semibold shadow"
+                        : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    {tSecs}s{tSecs === 30 ? " (Status)" : ""}
+                    {t("fitTargetDuration")}
                   </button>
-                ))}
-                <label className="flex items-center gap-1.5 text-slate-400">
-                  <span>{t("targetDurationLabel")}:</span>
-                  <input
-                    type="text"
-                    value={targetDurationInput}
-                    onChange={(e) => setTargetAndSyncMultiplier(e.target.value)}
-                    className="w-16 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-xs tabular-nums font-mono text-slate-200"
-                  />
-                  <span>s</span>
-                </label>
-                <span className="text-amber-400 font-mono font-medium">
-                  → {effectiveSpeed}x
-                </span>
+                </div>
+
+                {d.mode === "fixed" && (
+                  <div className="flex items-center gap-1.5">
+                    {[1.5, 2, 4, 8].map((mult) => (
+                      <button
+                        key={mult}
+                        type="button"
+                        onClick={() => {
+                          patchDraft(idx, (cur) => ({ ...cur, customMult: "" }));
+                          setMultiplierAndSyncTarget(idx, mult);
+                        }}
+                        className={`px-2 py-1 rounded border text-xs tabular-nums font-medium ${
+                          d.multiplier === mult && !d.customMult
+                            ? "border-amber-500 bg-amber-500/20 text-amber-300"
+                            : "border-slate-700 hover:bg-slate-800 text-slate-300"
+                        }`}
+                      >
+                        {mult}x
+                      </button>
+                    ))}
+                    <label className="flex items-center gap-1 text-slate-400">
+                      <input
+                        type="text"
+                        placeholder="custom"
+                        value={d.customMult}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          patchDraft(idx, (cur) => ({ ...cur, customMult: val }));
+                          const num = parseFloat(val);
+                          if (Number.isFinite(num) && num >= 1) {
+                            setMultiplierAndSyncTarget(idx, num);
+                          }
+                        }}
+                        className="w-16 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-xs tabular-nums font-mono text-slate-200"
+                      />
+                      <span>x</span>
+                    </label>
+                  </div>
+                )}
+
+                {d.mode === "target" && (
+                  <div className="flex items-center gap-1.5">
+                    {[15, 30, 60].map((tSecs) => (
+                      <button
+                        key={tSecs}
+                        type="button"
+                        onClick={() => setTargetAndSyncMultiplier(idx, String(tSecs))}
+                        className={`px-2 py-1 rounded border text-xs tabular-nums font-medium ${
+                          parseFloat(d.targetText) === tSecs
+                            ? "border-amber-500 bg-amber-500/20 text-amber-300"
+                            : "border-slate-700 hover:bg-slate-800 text-slate-300"
+                        }`}
+                      >
+                        {tSecs}s
+                      </button>
+                    ))}
+                    <label className="flex items-center gap-1.5 text-slate-400">
+                      <span>{t("targetDurationLabel")}:</span>
+                      <input
+                        type="text"
+                        value={d.targetText}
+                        onChange={(e) => setTargetAndSyncMultiplier(idx, e.target.value)}
+                        className="w-16 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-xs tabular-nums font-mono text-slate-200"
+                      />
+                      <span>s</span>
+                    </label>
+                    <span className="text-amber-400 font-mono font-medium">→ {d.multiplier}x</span>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => removeSpeedRange(idx)}
+                  title={t("removeFastForward")}
+                  className="ml-auto rounded border border-slate-700 px-2 py-1 text-slate-400 hover:border-red-500/60 hover:text-red-300"
+                >
+                  ✕
+                </button>
               </div>
-            )}
+            ))}
+
+            <button
+              type="button"
+              onClick={addSpeedRange}
+              className="self-start rounded-lg border border-dashed border-amber-500/50 px-3 py-1.5 text-xs font-medium text-amber-400 hover:border-amber-400 hover:bg-amber-500/10"
+            >
+              + {t("addFastForward")}
+            </button>
           </div>
         )}
       </div>
@@ -1207,7 +1307,7 @@ function TrimEditor({
           >
             {t("addPart")}
           </button>
-          {(ranges.length > 0 || file.trims.length > 0 || file.speedRange != null) && (
+          {(ranges.length > 0 || file.trims.length > 0 || file.speedRanges.length > 0) && (
             <button
               onClick={clearAll}
               className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800 text-xs font-medium"
@@ -1236,17 +1336,19 @@ function TrimEditor({
 
 const MIN_GAP = 0.1;
 
+type SpeedMark = { start: number; end: number; speed: number };
+
 function RangeSlider({
   duration,
   start,
   end,
   playhead,
   speedRampEnabled = false,
-  speedStart = start,
-  speedEnd = end,
-  speedMultiplier = 2,
+  speedRanges = [],
+  activeSpeedIdx = 0,
   onChange,
   onSpeedChange,
+  onSelectSpeed,
   onSeek,
   labels,
   speedLabels = ["Fast forward start", "Fast forward end"],
@@ -1256,17 +1358,27 @@ function RangeSlider({
   end: number;
   playhead?: number | null;
   speedRampEnabled?: boolean;
-  speedStart?: number;
-  speedEnd?: number;
-  speedMultiplier?: number;
+  speedRanges?: SpeedMark[];
+  activeSpeedIdx?: number;
   onChange: (start: number, end: number, moved: "start" | "end") => void;
-  onSpeedChange?: (speedStart: number, speedEnd: number, moved: "start" | "end") => void;
+  onSpeedChange?: (
+    speedStart: number,
+    speedEnd: number,
+    moved: "start" | "end",
+    idx: number,
+  ) => void;
+  onSelectSpeed?: (idx: number) => void;
   onSeek?: (t: number) => void;
   labels: [string, string];
   speedLabels?: [string, string];
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
-  const drag = useRef<"start" | "end" | "speedStart" | "speedEnd" | "seek" | null>(null);
+  // Speed handles carry the index of the range they belong to.
+  const drag = useRef<
+    | { kind: "start" | "end" | "seek" }
+    | { kind: "speedStart" | "speedEnd"; idx: number }
+    | null
+  >(null);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [isHovering, setIsHovering] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -1285,14 +1397,26 @@ function RangeSlider({
     else onChange(start, Math.max(Math.min(duration, end + delta), start + MIN_GAP), "end");
   }
 
-  function nudgeSpeed(which: "speedStart" | "speedEnd", delta: number) {
-    if (!onSpeedChange) return;
+  /** Free span range `idx` may occupy: the trim, minus its neighbours. */
+  function boundsFor(idx: number) {
+    const prev = speedRanges[idx - 1];
+    const next = speedRanges[idx + 1];
+    return {
+      lo: prev ? Math.max(start, prev.end) : start,
+      hi: next ? Math.min(end, next.start) : end,
+    };
+  }
+
+  function nudgeSpeed(which: "speedStart" | "speedEnd", idx: number, delta: number) {
+    const r = speedRanges[idx];
+    if (!onSpeedChange || !r) return;
+    const { lo, hi } = boundsFor(idx);
     if (which === "speedStart") {
-      const next = Math.min(Math.max(start, speedStart + delta), speedEnd - MIN_GAP);
-      onSpeedChange(next, speedEnd, "start");
+      const next = Math.min(Math.max(lo, r.start + delta), r.end - MIN_GAP);
+      onSpeedChange(next, r.end, "start", idx);
     } else {
-      const next = Math.max(Math.min(end, speedEnd + delta), speedStart + MIN_GAP);
-      onSpeedChange(speedStart, next, "end");
+      const next = Math.max(Math.min(hi, r.end + delta), r.start + MIN_GAP);
+      onSpeedChange(r.start, next, "end", idx);
     }
   }
 
@@ -1303,25 +1427,24 @@ function RangeSlider({
   let tooltipColor = "text-[#38bdf8] border-[#38bdf8]/60";
   let isSpeedTooltip = false;
 
-  if (drag.current === "start") {
+  const d = drag.current;
+  if (d?.kind === "start") {
     tooltipVal = start;
     tooltipLeftPct = pct(start);
     tooltipColor = "text-emerald-300 border-emerald-500/60";
-  } else if (drag.current === "end") {
+  } else if (d?.kind === "end") {
     tooltipVal = end;
     tooltipLeftPct = pct(end);
     tooltipColor = "text-emerald-300 border-emerald-500/60";
-  } else if (drag.current === "speedStart") {
-    tooltipVal = speedStart;
-    tooltipLeftPct = pct(speedStart);
-    tooltipColor = "text-amber-300 border-amber-500/60";
-    isSpeedTooltip = true;
-  } else if (drag.current === "speedEnd") {
-    tooltipVal = speedEnd;
-    tooltipLeftPct = pct(speedEnd);
-    tooltipColor = "text-amber-300 border-amber-500/60";
-    isSpeedTooltip = true;
-  } else if (drag.current === "seek" || isHovering) {
+  } else if (d?.kind === "speedStart" || d?.kind === "speedEnd") {
+    const r = speedRanges[d.idx];
+    if (r) {
+      tooltipVal = d.kind === "speedStart" ? r.start : r.end;
+      tooltipLeftPct = pct(tooltipVal);
+      tooltipColor = "text-amber-300 border-amber-500/60";
+      isSpeedTooltip = true;
+    }
+  } else if (d?.kind === "seek" || isHovering) {
     tooltipVal = hoverTime ?? playhead ?? 0;
     tooltipLeftPct = pct(tooltipVal);
   } else if (playhead != null) {
@@ -1339,7 +1462,7 @@ function RangeSlider({
         if (!drag.current) setHoverTime(null);
       }}
       onPointerDown={(ev) => {
-        drag.current = "seek";
+        drag.current = { kind: "seek" };
         setIsDragging(true);
         (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
         const t = timeAt(ev.clientX);
@@ -1349,19 +1472,23 @@ function RangeSlider({
       onPointerMove={(ev) => {
         const v = timeAt(ev.clientX);
         setHoverTime(v);
-        if (!drag.current) return;
-        if (drag.current === "seek") {
+        const cur = drag.current;
+        if (!cur) return;
+        if (cur.kind === "seek") {
           onSeek?.(v);
-        } else if (drag.current === "start") {
+        } else if (cur.kind === "start") {
           onChange(Math.min(v, end - MIN_GAP), end, "start");
-        } else if (drag.current === "end") {
+        } else if (cur.kind === "end") {
           onChange(start, Math.max(v, start + MIN_GAP), "end");
-        } else if (drag.current === "speedStart" && onSpeedChange) {
-          const clamped = Math.max(start, Math.min(v, speedEnd - MIN_GAP));
-          onSpeedChange(clamped, speedEnd, "start");
-        } else if (drag.current === "speedEnd" && onSpeedChange) {
-          const clamped = Math.min(end, Math.max(v, speedStart + MIN_GAP));
-          onSpeedChange(speedStart, clamped, "end");
+        } else if ((cur.kind === "speedStart" || cur.kind === "speedEnd") && onSpeedChange) {
+          const r = speedRanges[cur.idx];
+          if (!r) return;
+          const { lo, hi } = boundsFor(cur.idx);
+          if (cur.kind === "speedStart") {
+            onSpeedChange(Math.max(lo, Math.min(v, r.end - MIN_GAP)), r.end, "start", cur.idx);
+          } else {
+            onSpeedChange(r.start, Math.min(hi, Math.max(v, r.start + MIN_GAP)), "end", cur.idx);
+          }
         }
       }}
       onPointerUp={() => {
@@ -1383,22 +1510,28 @@ function RangeSlider({
           style={{ left: `${pct(start)}%`, width: `${Math.max(0, pct(end) - pct(start))}%` }}
         />
 
-        {/* Speed ramp sub-interval: amber overlay #f59e0b with diagonal stripe pattern */}
-        {speedRampEnabled && speedEnd > speedStart && (
-          <div
-            className="absolute top-0 bottom-0 bg-[#f59e0b]/85 border-x-2 border-[#f59e0b]"
-            style={{
-              left: `${pct(Math.max(0, speedStart))}%`,
-              width: `${Math.max(
-                0,
-                pct(Math.min(duration, speedEnd)) - pct(Math.max(0, speedStart)),
-              )}%`,
-              backgroundImage:
-                "repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0, 0, 0, 0.35) 4px, rgba(0, 0, 0, 0.35) 8px)",
-            }}
-            title={`⚡ ${speedMultiplier?.toFixed(1) ?? 2}x: ${fmtTime(speedStart)}–${fmtTime(speedEnd)}`}
-          />
-        )}
+        {/* Speed ramp sub-intervals: amber overlays with a diagonal stripe. */}
+        {speedRampEnabled &&
+          speedRanges.map((r, i) =>
+            r.end > r.start ? (
+              <div
+                key={i}
+                className={`absolute top-0 bottom-0 bg-[#f59e0b]/85 border-x-2 ${
+                  i === activeSpeedIdx ? "border-white/80" : "border-[#f59e0b]"
+                }`}
+                style={{
+                  left: `${pct(Math.max(0, r.start))}%`,
+                  width: `${Math.max(
+                    0,
+                    pct(Math.min(duration, r.end)) - pct(Math.max(0, r.start)),
+                  )}%`,
+                  backgroundImage:
+                    "repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0, 0, 0, 0.35) 4px, rgba(0, 0, 0, 0.35) 8px)",
+                }}
+                title={`⚡${i + 1} ${r.speed.toFixed(1)}x: ${fmtTime(r.start)}–${fmtTime(r.end)}`}
+              />
+            ) : null,
+          )}
       </div>
 
       {/* Playhead needle: laser cyan #38bdf8 vertical bar */}
@@ -1432,7 +1565,7 @@ function RangeSlider({
           aria-valuenow={which === "start" ? start : end}
           onPointerDown={(ev) => {
             ev.stopPropagation();
-            drag.current = which;
+            drag.current = { kind: which };
             (ev.target as Element).setPointerCapture(ev.pointerId);
             ev.preventDefault();
             setIsDragging(true);
@@ -1458,42 +1591,51 @@ function RangeSlider({
         </div>
       ))}
 
-      {/* Bottom rail handles: Speed start and end (Amber #f59e0b), only when speed ramp is active */}
+      {/* Bottom rail: two amber handles per fast-forward range. */}
       {speedRampEnabled &&
-        (["speedStart", "speedEnd"] as const).map((which, i) => (
-          <div
-            key={which}
-            tabIndex={0}
-            role="slider"
-            aria-label={speedLabels[i]}
-            aria-valuenow={which === "speedStart" ? speedStart : speedEnd}
-            onPointerDown={(ev) => {
-              ev.stopPropagation();
-              drag.current = which;
-              (ev.target as Element).setPointerCapture(ev.pointerId);
-              ev.preventDefault();
-              setIsDragging(true);
-            }}
-            onPointerUp={() => {
-              drag.current = null;
-              setIsDragging(false);
-            }}
-            onKeyDown={(ev) => {
-              const step = ev.shiftKey ? 1 : 0.1;
-              if (ev.key === "ArrowLeft") nudgeSpeed(which, -step);
-              else if (ev.key === "ArrowRight") nudgeSpeed(which, step);
-              else return;
-              ev.preventDefault();
-            }}
-            className="group absolute top-1/2 -translate-x-1/2 translate-y-[20%] cursor-ew-resize z-30 flex flex-col items-center focus:outline-none"
-            style={{ left: `${pct(which === "speedStart" ? speedStart : speedEnd)}%` }}
-          >
-            <div className="w-0 h-0 border-l-[3.5px] border-l-transparent border-r-[3.5px] border-r-transparent border-b-[4px] border-b-amber-400 -mb-px" />
-            <div className="h-6 w-3.5 rounded-b-md rounded-t-xs bg-amber-400 border border-white/80 shadow-[0_2px_6px_rgba(0,0,0,0.6)] group-hover:bg-amber-300 group-hover:scale-105 group-focus:ring-2 group-focus:ring-white transition-all flex flex-col items-center justify-center">
-              <span className="text-[8px] font-black text-amber-950 leading-none select-none">⚡</span>
+        speedRanges.flatMap((r, idx) =>
+          (["speedStart", "speedEnd"] as const).map((which, i) => (
+            <div
+              key={`${idx}-${which}`}
+              tabIndex={0}
+              role="slider"
+              aria-label={`${speedLabels[i]} ${idx + 1}`}
+              aria-valuenow={which === "speedStart" ? r.start : r.end}
+              onPointerDown={(ev) => {
+                ev.stopPropagation();
+                drag.current = { kind: which, idx };
+                onSelectSpeed?.(idx);
+                (ev.target as Element).setPointerCapture(ev.pointerId);
+                ev.preventDefault();
+                setIsDragging(true);
+              }}
+              onPointerUp={() => {
+                drag.current = null;
+                setIsDragging(false);
+              }}
+              onKeyDown={(ev) => {
+                const step = ev.shiftKey ? 1 : 0.1;
+                if (ev.key === "ArrowLeft") nudgeSpeed(which, idx, -step);
+                else if (ev.key === "ArrowRight") nudgeSpeed(which, idx, step);
+                else return;
+                ev.preventDefault();
+              }}
+              className="group absolute top-1/2 -translate-x-1/2 translate-y-[20%] cursor-ew-resize z-30 flex flex-col items-center focus:outline-none"
+              style={{ left: `${pct(which === "speedStart" ? r.start : r.end)}%` }}
+            >
+              <div className="w-0 h-0 border-l-[3.5px] border-l-transparent border-r-[3.5px] border-r-transparent border-b-[4px] border-b-amber-400 -mb-px" />
+              <div
+                className={`h-6 w-3.5 rounded-b-md rounded-t-xs bg-amber-400 border shadow-[0_2px_6px_rgba(0,0,0,0.6)] group-hover:bg-amber-300 group-hover:scale-105 group-focus:ring-2 group-focus:ring-white transition-all flex flex-col items-center justify-center ${
+                  idx === activeSpeedIdx ? "border-white" : "border-white/50"
+                }`}
+              >
+                <span className="text-[8px] font-black text-amber-950 leading-none select-none">
+                  {speedRanges.length > 1 ? idx + 1 : "⚡"}
+                </span>
+              </div>
             </div>
-          </div>
-        ))}
+          )),
+        )}
     </div>
   );
 }

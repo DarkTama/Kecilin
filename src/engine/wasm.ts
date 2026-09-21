@@ -145,7 +145,7 @@ async function convertOne(
         "veryfast", // wasm is slow enough already
         null, // no GPU encoders in the browser
         opts.extraArgs,
-        item.speedRange ?? null,
+        item.speedRanges ?? item.speedRange ?? null,
         opts.stripMetadata ?? false,
         item.duration ?? undefined,
       );

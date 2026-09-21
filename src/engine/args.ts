@@ -79,24 +79,88 @@ export function buildAtempoChain(speed: number): string {
   return factors.join(",");
 }
 
+/** A speed range only does something when it is finite, faster than 1x and non-empty. */
+function isUsefulSpeedRange(r: SpeedRange): boolean {
+  return Number.isFinite(r.speed) && r.speed > 1.0 && r.end > r.start + 0.05;
+}
+
+/**
+ * Clamps speed ranges into the trim, drops the ones that do nothing, sorts
+ * them and removes overlaps by pushing each range's start to the end of the
+ * previous one.
+ *
+ * Everything downstream — duration maths, filtergraph, UI strip — assumes the
+ * result: ascending, non-overlapping and inside the trim.
+ */
+export function normalizeSpeedRanges(
+  ranges: readonly SpeedRange[] | null | undefined,
+  trim: { start: number; end: number } | null,
+  totalDuration?: number,
+): SpeedRange[] {
+  if (!ranges || ranges.length === 0) return [];
+  const tStart = trim?.start ?? 0;
+  const tEnd = trim?.end ?? totalDuration;
+
+  const clamped = ranges
+    .filter(isUsefulSpeedRange)
+    .map((r) => {
+      const start =
+        tEnd !== undefined ? Math.max(tStart, Math.min(tEnd, r.start)) : Math.max(tStart, r.start);
+      const end =
+        tEnd !== undefined ? Math.max(start, Math.min(tEnd, r.end)) : Math.max(start, r.end);
+      return { ...r, start, end };
+    })
+    .sort((a, b) => a.start - b.start);
+
+  const out: SpeedRange[] = [];
+  for (const r of clamped) {
+    const prevEnd = out.length > 0 ? out[out.length - 1].end : -Infinity;
+    const start = Math.max(r.start, prevEnd);
+    if (r.end > start + 0.05) out.push({ ...r, start, end: r.end });
+  }
+  return out;
+}
+
+/** Accepts either the legacy single range or the list, and normalizes both. */
+export function resolveSpeedRanges(
+  speedRange: SpeedRange | null | undefined,
+  speedRanges: readonly SpeedRange[] | null | undefined,
+  trim: { start: number; end: number } | null,
+  totalDuration?: number,
+): SpeedRange[] {
+  const source =
+    speedRanges && speedRanges.length > 0 ? speedRanges : speedRange ? [speedRange] : [];
+  return normalizeSpeedRanges(source, trim, totalDuration);
+}
+
 /**
  * Calculates effective playback duration taking sub-range speedup into account.
+ *
+ * Accepts a single range or a list; the list form is normalized first, so
+ * overlapping or out-of-trim input cannot double-count.
  */
 export function calculateEffectiveDuration(
   totalDuration: number,
   trim: { start: number; end: number } | null,
-  speedRange: SpeedRange | null,
+  speedRange: SpeedRange | readonly SpeedRange[] | null,
 ): number {
   const tStart = trim?.start ?? 0;
   const tEnd = trim?.end ?? totalDuration;
-  // A non-finite speed is treated as "no speedup" so this stays in step with
-  // `buildOutputSegments` in src/preview.ts, which draws the same result.
-  if (!speedRange || !Number.isFinite(speedRange.speed) || speedRange.speed <= 1.0) {
-    return tEnd - tStart;
+  const trimmed = tEnd - tStart;
+  const ranges = normalizeSpeedRanges(
+    speedRange == null ? [] : Array.isArray(speedRange) ? speedRange : [speedRange as SpeedRange],
+    trim,
+    totalDuration,
+  );
+  if (ranges.length === 0) return trimmed;
+  // Each range shortens the output by the time it saves; the untouched parts
+  // are carried by `trimmed`.
+  let saved = 0;
+  for (const r of ranges) {
+    const len = r.end - r.start;
+    saved += len - len / r.speed;
   }
-  const sStart = Math.max(tStart, Math.min(tEnd, speedRange.start));
-  const sEnd = Math.max(sStart, Math.min(tEnd, speedRange.end));
-  return (sStart - tStart) + (sEnd - sStart) / speedRange.speed + (tEnd - sEnd);
+  return trimmed - saved;
 }
 
 /**
@@ -127,64 +191,72 @@ export function solveSpeedMultiplier(
 }
 
 /**
- * Builds single-pass complex filtergraph for sub-range speed acceleration.
+ * Builds a single-pass complex filtergraph for sub-range speed acceleration.
+ *
+ * With N speed ranges the graph is 2N+1 segments at most: a normal segment for
+ * every gap between ranges (plus the head and tail), and a sped segment per
+ * range. Empty gaps are skipped, so a single range flush with both trim edges
+ * still yields exactly one segment.
  */
 export function buildSpeedFiltergraph(options: {
   trim: Trim | null;
-  speedRange: SpeedRange;
+  /** @deprecated pass `speedRanges` instead. */
+  speedRange?: SpeedRange;
+  speedRanges?: readonly SpeedRange[];
   height: number;
   hasAudio: boolean;
   audio: AudioOpt;
   normalize: boolean;
   duration?: number;
 }): { filterComplex: string; mapArgs: string[] } {
-  const { trim, speedRange, height, normalize, duration } = options;
+  const { trim, height, normalize, duration } = options;
   const hasAudio = options.hasAudio && options.audio !== "mute";
 
   const tStart = trim?.start ?? 0;
   const tEnd = trim?.end ?? duration;
 
-  const sStart =
-    tEnd !== undefined
-      ? Math.max(tStart, Math.min(tEnd, speedRange.start))
-      : Math.max(tStart, speedRange.start);
-  const sEnd =
-    tEnd !== undefined
-      ? Math.max(sStart, Math.min(tEnd, speedRange.end))
-      : Math.max(sStart, speedRange.end);
+  const ranges = resolveSpeedRanges(
+    options.speedRange ?? null,
+    options.speedRanges ?? null,
+    trim ? { start: trim.start, end: trim.end } : null,
+    duration,
+  );
 
-  const speed = speedRange.speed;
   const chains: string[] = [];
   const segLabels: { v: string; a?: string }[] = [];
 
   const fmt = (n: number): string => Number(n.toFixed(4)).toString();
 
-  // 1. Pre-speed segment: [T_start, S_start] if S_start > T_start + 0.001
-  if (sStart > tStart + 0.001) {
+  /** Emits one normal segment; `to === undefined` means "to the end of input". */
+  function pushNormal(from: number, to: number | undefined) {
+    // Skip a gap too short to be worth a segment (also what keeps a range
+    // flush with a trim edge from emitting an empty chunk).
+    if (to !== undefined && to < from + 0.001) return;
     const idx = segLabels.length;
     const vLabel = `v${idx}`;
-    chains.push(`[0:v]trim=start=${fmt(tStart)}:end=${fmt(sStart)},setpts=PTS-STARTPTS[${vLabel}]`);
+    const vRange = to !== undefined ? `start=${fmt(from)}:end=${fmt(to)}` : `start=${fmt(from)}`;
+    chains.push(`[0:v]trim=${vRange},setpts=PTS-STARTPTS[${vLabel}]`);
     if (hasAudio) {
       const aLabel = `a${idx}`;
-      chains.push(`[0:a]atrim=start=${fmt(tStart)}:end=${fmt(sStart)},asetpts=PTS-STARTPTS[${aLabel}]`);
+      chains.push(`[0:a]atrim=${vRange},asetpts=PTS-STARTPTS[${aLabel}]`);
       segLabels.push({ v: vLabel, a: aLabel });
     } else {
       segLabels.push({ v: vLabel });
     }
   }
 
-  // 2. Sped segment: [S_start, S_end]
-  {
+  /** Emits one sped segment. */
+  function pushSped(from: number, to: number, speed: number) {
     const idx = segLabels.length;
     const vLabel = `v${idx}`;
     chains.push(
-      `[0:v]trim=start=${fmt(sStart)}:end=${fmt(sEnd)},setpts=PTS-STARTPTS,setpts=PTS/${fmt(speed)}[${vLabel}]`,
+      `[0:v]trim=start=${fmt(from)}:end=${fmt(to)},setpts=PTS-STARTPTS,setpts=PTS/${fmt(speed)}[${vLabel}]`,
     );
     if (hasAudio) {
       const aLabel = `a${idx}`;
       const atempoChain = buildAtempoChain(speed);
       chains.push(
-        `[0:a]atrim=start=${fmt(sStart)}:end=${fmt(sEnd)},asetpts=PTS-STARTPTS,${atempoChain}[${aLabel}]`,
+        `[0:a]atrim=start=${fmt(from)}:end=${fmt(to)},asetpts=PTS-STARTPTS,${atempoChain}[${aLabel}]`,
       );
       segLabels.push({ v: vLabel, a: aLabel });
     } else {
@@ -192,32 +264,14 @@ export function buildSpeedFiltergraph(options: {
     }
   }
 
-  // 3. Post-speed segment: [S_end, T_end] if S_end < T_end - 0.001, or open-ended [S_end, ...) if tEnd is undefined
-  if (tEnd !== undefined) {
-    if (sEnd < tEnd - 0.001) {
-      const idx = segLabels.length;
-      const vLabel = `v${idx}`;
-      chains.push(`[0:v]trim=start=${fmt(sEnd)}:end=${fmt(tEnd)},setpts=PTS-STARTPTS[${vLabel}]`);
-      if (hasAudio) {
-        const aLabel = `a${idx}`;
-        chains.push(`[0:a]atrim=start=${fmt(sEnd)}:end=${fmt(tEnd)},asetpts=PTS-STARTPTS[${aLabel}]`);
-        segLabels.push({ v: vLabel, a: aLabel });
-      } else {
-        segLabels.push({ v: vLabel });
-      }
-    }
-  } else {
-    const idx = segLabels.length;
-    const vLabel = `v${idx}`;
-    chains.push(`[0:v]trim=start=${fmt(sEnd)},setpts=PTS-STARTPTS[${vLabel}]`);
-    if (hasAudio) {
-      const aLabel = `a${idx}`;
-      chains.push(`[0:a]atrim=start=${fmt(sEnd)},asetpts=PTS-STARTPTS[${aLabel}]`);
-      segLabels.push({ v: vLabel, a: aLabel });
-    } else {
-      segLabels.push({ v: vLabel });
-    }
+  let cursor = tStart;
+  for (const r of ranges) {
+    pushNormal(cursor, r.start);
+    pushSped(r.start, r.end, r.speed);
+    cursor = r.end;
   }
+  // Tail: bounded by the trim end, or open-ended when the duration is unknown.
+  pushNormal(cursor, tEnd);
 
   // Concat stitch
   const count = segLabels.length;
@@ -272,7 +326,7 @@ export function buildFfmpegArgs(
   audioSource?: AudioSource,
   normalize?: boolean,
   extraArgs?: string[],
-  speedRange?: SpeedRange | null,
+  speedRange?: SpeedRange | readonly SpeedRange[] | null,
   stripMetadata?: boolean,
   hasAudio?: boolean,
   duration?: number,
@@ -286,7 +340,7 @@ export function buildFfmpegArgs(
   speed?: "slow" | "veryfast",
   encoder?: string | null,
   extra?: string[],
-  speedRange?: SpeedRange | null,
+  speedRange?: SpeedRange | readonly SpeedRange[] | null,
   stripMetadata?: boolean,
   duration?: number,
 ): string[];
@@ -299,7 +353,7 @@ export function buildFfmpegArgs(
   arg6?: AudioSource | "slow" | "veryfast",
   arg7?: boolean | string | null,
   arg8?: string[],
-  arg9?: SpeedRange | null,
+  arg9?: SpeedRange | readonly SpeedRange[] | null,
   arg10?: boolean,
   arg11?: boolean | number,
   arg12?: number,
@@ -308,7 +362,7 @@ export function buildFfmpegArgs(
   let audioSource: AudioSource = "default";
   let normalize = false;
   let extraArgs: string[] = [];
-  let speedRange: SpeedRange | null = null;
+  let speedRangeArg: SpeedRange | readonly SpeedRange[] | null = null;
   let stripMetadata = false;
   let hasAudio = true;
   let duration: number | undefined = undefined;
@@ -321,7 +375,7 @@ export function buildFfmpegArgs(
     audioSource = (arg6 as AudioSource) ?? "default";
     normalize = typeof arg7 === "boolean" ? arg7 : false;
     extraArgs = (arg8 as string[]) ?? [];
-    speedRange = (arg9 as SpeedRange | null) ?? null;
+    speedRangeArg = arg9 ?? null;
     stripMetadata = typeof arg10 === "boolean" ? arg10 : false;
     hasAudio = typeof arg11 === "boolean" ? arg11 : true;
     duration = typeof arg12 === "number" ? arg12 : undefined;
@@ -330,7 +384,7 @@ export function buildFfmpegArgs(
     speedPreset = (arg6 as "slow" | "veryfast") ?? "slow";
     encoder = (arg7 as string | null) ?? null;
     extraArgs = (arg8 as string[]) ?? [];
-    speedRange = (arg9 as SpeedRange | null) ?? null;
+    speedRangeArg = arg9 ?? null;
     stripMetadata = typeof arg10 === "boolean" ? arg10 : false;
     duration = typeof arg11 === "number" ? arg11 : undefined;
 
@@ -340,10 +394,13 @@ export function buildFfmpegArgs(
     hasAudio = audio.level !== "mute";
   }
 
-  const isSpeedActive =
-    speedRange != null &&
-    speedRange.speed > 1.0 &&
-    speedRange.end > speedRange.start + 0.05;
+  const speedRanges = resolveSpeedRanges(
+    Array.isArray(speedRangeArg) ? null : (speedRangeArg as SpeedRange | null),
+    Array.isArray(speedRangeArg) ? (speedRangeArg as readonly SpeedRange[]) : null,
+    trim ? { start: trim.start, end: trim.end } : null,
+    duration,
+  );
+  const isSpeedActive = speedRanges.length > 0;
   const mute = legacyOpts ? legacyOpts.level === "mute" : (!hasAudio || audioOpt === "mute");
 
   const a: string[] = ["-y"];
@@ -354,7 +411,7 @@ export function buildFfmpegArgs(
   if (isSpeedActive) {
     const fg = buildSpeedFiltergraph({
       trim,
-      speedRange: speedRange!,
+      speedRanges,
       height: preset.height,
       hasAudio: !mute && hasAudio,
       audio: audioOpt,

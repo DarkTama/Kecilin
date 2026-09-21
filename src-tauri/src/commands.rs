@@ -207,6 +207,10 @@ pub struct BatchItem {
     #[serde(default)]
     #[allow(dead_code)]
     pub speed_range: Option<SpeedRange>,
+    /// Several non-overlapping speed ranges inside one trim (preferred).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub speed_ranges: Option<Vec<SpeedRange>>,
 }
 
 /// Batch-wide options from the UI (presets + the Advanced panel).
@@ -421,12 +425,13 @@ pub(crate) fn build_ffmpeg_args(
     encoder: Option<&str>,
     extra: &[String],
     strip_metadata: bool,
-    speed_range: Option<&SpeedRange>,
+    speed_ranges: &[SpeedRange],
     duration: Option<f64>,
 ) -> Vec<String> {
-    let is_speed_active = speed_range
-        .map(|s| s.speed > 1.0 && s.end > s.start + 0.05)
-        .unwrap_or(false);
+    let t_start = trim.map(|t| t.start).unwrap_or(0.0);
+    let t_end = trim.map(|t| t.end).or(duration);
+    let normalized = normalize_speed_ranges(speed_ranges, t_start, t_end);
+    let is_speed_active = !normalized.is_empty();
     let mute = audio.level == Some("mute");
 
     let mut a: Vec<String> = vec!["-y".into()];
@@ -459,7 +464,7 @@ pub(crate) fn build_ffmpeg_args(
     if is_speed_active {
         let (graph, maps) = build_speed_filtergraph(
             trim,
-            speed_range.unwrap(),
+            &normalized,
             p.height,
             !mute,
             audio.level,
@@ -535,11 +540,67 @@ pub(crate) fn build_atempo_chain(speed: f64) -> String {
         .join(",")
 }
 
-/// Speed-ramp filtergraph: trim → pre-speed / sped / post-speed segments →
+/// Clamp speed ranges into the trim, drop no-op ones, sort and de-overlap.
+/// Result is strictly ascending and non-overlapping.
+pub(crate) fn normalize_speed_ranges(
+    ranges: &[SpeedRange],
+    t_start: f64,
+    t_end: Option<f64>,
+) -> Vec<SpeedRange> {
+    let mut clamped: Vec<SpeedRange> = Vec::new();
+    for r in ranges {
+        if !r.speed.is_finite() || r.speed <= 1.0 || !r.start.is_finite() || !r.end.is_finite() {
+            continue;
+        }
+        let s_start = match t_end {
+            Some(te) => t_start.max(te.min(r.start)),
+            None => t_start.max(r.start),
+        };
+        let s_end = match t_end {
+            Some(te) => s_start.max(te.min(r.end)),
+            None => s_start.max(r.end),
+        };
+        if s_end <= s_start + 0.05 {
+            continue;
+        }
+        let mut c = r.clone();
+        c.start = s_start;
+        c.end = s_end;
+        clamped.push(c);
+    }
+    clamped.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out: Vec<SpeedRange> = Vec::new();
+    for mut r in clamped {
+        if let Some(prev) = out.last() {
+            if r.start < prev.end {
+                r.start = prev.end;
+            }
+        }
+        if r.end <= r.start + 0.05 {
+            continue;
+        }
+        out.push(r);
+    }
+    out
+}
+
+/// Ranges the UI asked for: the new plural field wins, the legacy singular
+/// field stays supported for older payloads.
+pub(crate) fn effective_speed_ranges(item: &BatchItem) -> Vec<SpeedRange> {
+    if let Some(rs) = item.speed_ranges.as_ref() {
+        if !rs.is_empty() {
+            return rs.clone();
+        }
+    }
+    item.speed_range.as_ref().map(|r| vec![r.clone()]).unwrap_or_default()
+}
+
+/// Speed-ramp filtergraph: trim → alternating normal / sped segments →
 /// concat → scale, mirroring `buildSpeedFiltergraph` in `src/engine/args.ts`.
 pub(crate) fn build_speed_filtergraph(
     trim: Option<&Trim>,
-    speed_range: &SpeedRange,
+    speed_ranges: &[SpeedRange],
     height: u32,
     has_audio: bool,
     audio_level: Option<&str>,
@@ -549,104 +610,79 @@ pub(crate) fn build_speed_filtergraph(
     let t_start = trim.map(|t| t.start).unwrap_or(0.0);
     let t_end = trim.map(|t| t.end).or(duration);
 
-    let s_start = match t_end {
-        Some(te) => t_start.max(te.min(speed_range.start)),
-        None => t_start.max(speed_range.start),
-    };
-    let s_end = match t_end {
-        Some(te) => s_start.max(te.min(speed_range.end)),
-        None => s_start.max(speed_range.end),
-    };
-    let speed = speed_range.speed;
+    let ranges = normalize_speed_ranges(speed_ranges, t_start, t_end);
 
     let mut chains: Vec<String> = Vec::new();
     let mut seg_labels: Vec<(String, Option<String>)> = Vec::new();
     let fmt = |n: f64| -> String { format!("{:.3}", n) };
 
-    // 1. Pre-speed segment
-    if s_start > t_start + 0.001 {
+    // Emit one segment: video chain always, audio chain when the track is kept.
+    let emit = |chains: &mut Vec<String>,
+                seg_labels: &mut Vec<(String, Option<String>)>,
+                v_filters: String,
+                a_filters: String| {
         let idx = seg_labels.len();
         let v_label = format!("v{idx}");
-        chains.push(format!(
-            "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS[{v_label}]",
-            fmt(t_start),
-            fmt(s_start)
-        ));
+        chains.push(format!("[0:v]{v_filters}[{v_label}]"));
         if has_audio {
             let a_label = format!("a{idx}");
-            chains.push(format!(
-                "[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{a_label}]",
-                fmt(t_start),
-                fmt(s_start)
-            ));
+            chains.push(format!("[0:a]{a_filters}[{a_label}]"));
             seg_labels.push((v_label, Some(a_label)));
         } else {
             seg_labels.push((v_label, None));
         }
-    }
+    };
 
-    // 2. Sped segment
-    {
-        let idx = seg_labels.len();
-        let v_label = format!("v{idx}");
-        chains.push(format!(
-            "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS,setpts=PTS/{:.3}[{v_label}]",
-            fmt(s_start),
-            fmt(s_end),
-            speed
-        ));
-        if has_audio {
-            let a_label = format!("a{idx}");
-            let atempo = build_atempo_chain(speed);
-            chains.push(format!(
-                "[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,{atempo}[{a_label}]",
-                fmt(s_start),
-                fmt(s_end)
-            ));
-            seg_labels.push((v_label, Some(a_label)));
-        } else {
-            seg_labels.push((v_label, None));
+    let mut cursor = t_start;
+    for r in &ranges {
+        // Normal gap before this range (head gap included).
+        if r.start > cursor + 0.001 {
+            emit(
+                &mut chains,
+                &mut seg_labels,
+                format!("trim=start={}:end={},setpts=PTS-STARTPTS", fmt(cursor), fmt(r.start)),
+                format!("atrim=start={}:end={},asetpts=PTS-STARTPTS", fmt(cursor), fmt(r.start)),
+            );
         }
+        // Sped segment.
+        let atempo = build_atempo_chain(r.speed);
+        emit(
+            &mut chains,
+            &mut seg_labels,
+            format!(
+                "trim=start={}:end={},setpts=PTS-STARTPTS,setpts=PTS/{:.3}",
+                fmt(r.start),
+                fmt(r.end),
+                r.speed
+            ),
+            format!(
+                "atrim=start={}:end={},asetpts=PTS-STARTPTS,{atempo}",
+                fmt(r.start),
+                fmt(r.end)
+            ),
+        );
+        cursor = r.end;
     }
 
-    // 3. Post-speed segment
-    if let Some(te) = t_end {
-        if s_end < te - 0.001 {
-            let idx = seg_labels.len();
-            let v_label = format!("v{idx}");
-            chains.push(format!(
-                "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS[{v_label}]",
-                fmt(s_end),
-                fmt(te)
-            ));
-            if has_audio {
-                let a_label = format!("a{idx}");
-                chains.push(format!(
-                    "[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{a_label}]",
-                    fmt(s_end),
-                    fmt(te)
-                ));
-                seg_labels.push((v_label, Some(a_label)));
-            } else {
-                seg_labels.push((v_label, None));
+    // Tail segment after the last range.
+    match t_end {
+        Some(te) => {
+            if cursor < te - 0.001 {
+                emit(
+                    &mut chains,
+                    &mut seg_labels,
+                    format!("trim=start={}:end={},setpts=PTS-STARTPTS", fmt(cursor), fmt(te)),
+                    format!("atrim=start={}:end={},asetpts=PTS-STARTPTS", fmt(cursor), fmt(te)),
+                );
             }
         }
-    } else {
-        let idx = seg_labels.len();
-        let v_label = format!("v{idx}");
-        chains.push(format!(
-            "[0:v]trim=start={},setpts=PTS-STARTPTS[{v_label}]",
-            fmt(s_end)
-        ));
-        if has_audio {
-            let a_label = format!("a{idx}");
-            chains.push(format!(
-                "[0:a]atrim=start={},asetpts=PTS-STARTPTS[{a_label}]",
-                fmt(s_end)
-            ));
-            seg_labels.push((v_label, Some(a_label)));
-        } else {
-            seg_labels.push((v_label, None));
+        None => {
+            emit(
+                &mut chains,
+                &mut seg_labels,
+                format!("trim=start={},setpts=PTS-STARTPTS", fmt(cursor)),
+                format!("atrim=start={},asetpts=PTS-STARTPTS", fmt(cursor)),
+            );
         }
     }
 
@@ -718,7 +754,7 @@ pub(crate) fn build_args(
         encoder,
         extra,
         strip_metadata,
-        None,
+        &[],
         None,
     )
 }
@@ -1676,7 +1712,7 @@ async fn convert_segment(
         opts.encoder.as_deref(),
         &opts.extra_args,
         opts.strip_metadata,
-        item.speed_range.as_ref(),
+        &effective_speed_ranges(item),
         item.duration,
     );
     let (mut rx, child) = ffmpeg(app)
@@ -1812,7 +1848,7 @@ mod tests {
     }
 
     fn args(input: &str, output: &str, preset: &str, trim: Option<&Trim>, a: AudioOpts) -> Vec<String> {
-        build_ffmpeg_args(input, output, &builtin_preset(preset).unwrap(), trim, a, None, &[], false, None, None)
+        build_ffmpeg_args(input, output, &builtin_preset(preset).unwrap(), trim, a, None, &[], false, &[], None)
     }
 
     #[test]
@@ -1918,7 +1954,7 @@ mod tests {
     fn gpu_encoders_swap_the_video_block_and_keep_the_ceiling() {
         let p = builtin_preset("720p").unwrap();
         for (enc, codec) in [("nvenc", "h264_nvenc"), ("amf", "h264_amf"), ("qsv", "h264_qsv")] {
-            let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some(enc), &[], false, None, None);
+            let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some(enc), &[], false, &[], None);
             assert!(a.contains(&codec.to_string()), "{enc}");
             assert!(!a.contains(&"libx264".to_string()), "{enc}");
             assert!(!a.iter().any(|x| x == "-x264-params"), "{enc}");
@@ -1927,7 +1963,7 @@ mod tests {
             assert!(a.contains(&"-c:a".to_string()), "{enc}: audio block intact");
         }
         // Unknown encoder ids fall back to x264.
-        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some("vhs"), &[], false, None, None);
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), Some("vhs"), &[], false, &[], None);
         assert!(a.contains(&"libx264".to_string()));
     }
 
@@ -1935,7 +1971,7 @@ mod tests {
     fn extra_args_land_right_before_the_output() {
         let p = builtin_preset("480p").unwrap();
         let extra = vec!["-metadata".to_string(), "title=x".to_string()];
-        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &extra, false, None, None);
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &extra, false, &[], None);
         let n = a.len();
         assert_eq!(&a[n - 3..], &["-metadata", "title=x", "out.mp4"]);
         assert_eq!(a[n - 4], "-nostats");
@@ -2037,12 +2073,12 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
     #[test]
     fn metadata_stripping_appends_flag_before_output() {
         let p = builtin_preset("480p").unwrap();
-        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], true, None, None);
+        let a = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], true, &[], None);
         let n = a.len();
         assert_eq!(&a[n - 3..], &["-map_metadata", "-1", "out.mp4"]);
         assert_eq!(a[n - 4], "-nostats");
 
-        let a_off = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], false, None, None);
+        let a_off = build_ffmpeg_args("in.mp4", "out.mp4", &p, None, AudioOpts::default(), None, &[], false, &[], None);
         assert!(!a_off.contains(&"-map_metadata".to_string()));
     }
 
@@ -2055,6 +2091,10 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
         assert_eq!(build_atempo_chain(0.0), "atempo=1.0");
     }
 
+    fn mk_range(start: f64, end: f64, speed: f64) -> SpeedRange {
+        SpeedRange { start, end, speed, fit_target: false, target_duration: None }
+    }
+
     #[test]
     fn speed_filtergraph_trims_and_concats_three_segments() {
         let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
@@ -2065,8 +2105,15 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
             fit_target: false,
             target_duration: None,
         };
-        let (graph, maps) =
-            build_speed_filtergraph(Some(&trim), &sr, 480, true, Some("50"), true, None);
+        let (graph, maps) = build_speed_filtergraph(
+            Some(&trim),
+            std::slice::from_ref(&sr),
+            480,
+            true,
+            Some("50"),
+            true,
+            None,
+        );
         assert!(graph.contains("[0:v]trim=start=1.000:end=3.000,setpts=PTS-STARTPTS[v0]"));
         assert!(graph.contains("[0:v]trim=start=3.000:end=6.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v1]"));
         assert!(graph.contains("[0:v]trim=start=6.000:end=10.000,setpts=PTS-STARTPTS[v2]"));
@@ -2074,6 +2121,87 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
         assert!(graph.contains("[vcat]scale=-2:480:flags=lanczos[vout]"));
         assert!(graph.contains(&format!("[acat]{LOUDNORM},volume=0.5[aout]")));
         assert_eq!(maps, vec!["-map", "[vout]", "-map", "[aout]"]);
+    }
+
+    #[test]
+    fn single_range_graph_is_byte_identical() {
+        let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
+        let sr = mk_range(3.0, 6.0, 2.0);
+        let (graph, _) = build_speed_filtergraph(
+            Some(&trim),
+            std::slice::from_ref(&sr),
+            480,
+            true,
+            Some("50"),
+            true,
+            None,
+        );
+        let expected = [
+            "[0:v]trim=start=1.000:end=3.000,setpts=PTS-STARTPTS[v0]".to_string(),
+            "[0:a]atrim=start=1.000:end=3.000,asetpts=PTS-STARTPTS[a0]".to_string(),
+            "[0:v]trim=start=3.000:end=6.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v1]".to_string(),
+            "[0:a]atrim=start=3.000:end=6.000,asetpts=PTS-STARTPTS,atempo=2.000[a1]".to_string(),
+            "[0:v]trim=start=6.000:end=10.000,setpts=PTS-STARTPTS[v2]".to_string(),
+            "[0:a]atrim=start=6.000:end=10.000,asetpts=PTS-STARTPTS[a2]".to_string(),
+            "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vcat][acat]".to_string(),
+            "[vcat]scale=-2:480:flags=lanczos[vout]".to_string(),
+            format!("[acat]{LOUDNORM},volume=0.5[aout]"),
+        ]
+        .join(";");
+        assert_eq!(graph, expected);
+    }
+
+    #[test]
+    fn two_ranges_produce_five_segments() {
+        let trim = Trim { start: 1.0, end: 20.0, custom_name: None };
+        let ranges = vec![mk_range(3.0, 6.0, 2.0), mk_range(10.0, 12.0, 4.0)];
+        let (graph, _) =
+            build_speed_filtergraph(Some(&trim), &ranges, 480, true, None, false, None);
+        assert!(graph.contains("[0:v]trim=start=1.000:end=3.000,setpts=PTS-STARTPTS[v0]"));
+        assert!(graph.contains("[0:v]trim=start=3.000:end=6.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v1]"));
+        assert!(graph.contains("[0:v]trim=start=6.000:end=10.000,setpts=PTS-STARTPTS[v2]"));
+        assert!(graph.contains("[0:v]trim=start=10.000:end=12.000,setpts=PTS-STARTPTS,setpts=PTS/4.000[v3]"));
+        assert!(graph.contains("[0:a]atrim=start=10.000:end=12.000,asetpts=PTS-STARTPTS,atempo=2.000,atempo=2.000[a3]"));
+        assert!(graph.contains("[0:v]trim=start=12.000:end=20.000,setpts=PTS-STARTPTS[v4]"));
+        assert!(graph.contains("concat=n=5:v=1:a=1[vcat][acat]"));
+    }
+
+    #[test]
+    fn range_flush_with_trim_start_produces_four_segments() {
+        let trim = Trim { start: 1.0, end: 20.0, custom_name: None };
+        let ranges = vec![mk_range(1.0, 4.0, 2.0), mk_range(10.0, 12.0, 2.0)];
+        let (graph, _) =
+            build_speed_filtergraph(Some(&trim), &ranges, 480, true, None, false, None);
+        assert!(graph.contains("[0:v]trim=start=1.000:end=4.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v0]"));
+        assert!(graph.contains("[0:v]trim=start=4.000:end=10.000,setpts=PTS-STARTPTS[v1]"));
+        assert!(graph.contains("[0:v]trim=start=10.000:end=12.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v2]"));
+        assert!(graph.contains("[0:v]trim=start=12.000:end=20.000,setpts=PTS-STARTPTS[v3]"));
+        assert!(graph.contains("concat=n=4:v=1:a=1[vcat][acat]"));
+    }
+
+    #[test]
+    fn overlapping_ranges_are_normalized_to_disjoint() {
+        let ranges = vec![mk_range(5.0, 10.0, 3.0), mk_range(3.0, 8.0, 2.0)];
+        let out = normalize_speed_ranges(&ranges, 0.0, Some(20.0));
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].start, out[0].end, out[0].speed), (3.0, 8.0, 2.0));
+        assert_eq!((out[1].start, out[1].end, out[1].speed), (8.0, 10.0, 3.0));
+        for w in out.windows(2) {
+            assert!(w[0].end <= w[1].start);
+        }
+    }
+
+    #[test]
+    fn normalize_drops_slow_and_degenerate_ranges() {
+        let ranges = vec![
+            mk_range(1.0, 5.0, 1.0),
+            mk_range(1.0, 5.0, 0.5),
+            mk_range(6.0, 6.02, 2.0),
+            mk_range(7.0, 9.0, f64::NAN),
+            mk_range(30.0, 40.0, 2.0),
+        ];
+        let out = normalize_speed_ranges(&ranges, 0.0, Some(20.0));
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -2096,7 +2224,7 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
             None,
             &[],
             false,
-            Some(&sr),
+            std::slice::from_ref(&sr),
             None,
         );
         assert!(!a.contains(&"-ss".to_string()));
@@ -2121,11 +2249,55 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
             None,
             &[],
             false,
-            Some(&flat),
+            std::slice::from_ref(&flat),
             None,
         );
         assert!(b.contains(&"-vf".to_string()));
         assert!(!b.contains(&"-filter_complex".to_string()));
+    }
+
+    #[test]
+    fn empty_speed_ranges_take_the_plain_path() {
+        let p = builtin_preset("480p").unwrap();
+        let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
+        let a = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            AudioOpts::default(),
+            None,
+            &[],
+            false,
+            &[],
+            None,
+        );
+        assert!(a.contains(&"-vf".to_string()));
+        assert!(a.contains(&"-ss".to_string()));
+        assert!(!a.contains(&"-filter_complex".to_string()));
+    }
+
+    #[test]
+    fn effective_speed_ranges_prefers_plural_field() {
+        let mut item = BatchItem {
+            path: "in.mp4".into(),
+            duration: None,
+            trims: Vec::new(),
+            audio: None,
+            audio_source: None,
+            normalize: false,
+            audio_tracks: 0,
+            speed_range: Some(mk_range(1.0, 2.0, 2.0)),
+            speed_ranges: None,
+        };
+        assert_eq!(effective_speed_ranges(&item).len(), 1);
+        item.speed_ranges = Some(Vec::new());
+        assert_eq!(effective_speed_ranges(&item).len(), 1);
+        item.speed_ranges = Some(vec![mk_range(1.0, 2.0, 2.0), mk_range(4.0, 6.0, 3.0)]);
+        assert_eq!(effective_speed_ranges(&item).len(), 2);
+        item.speed_range = None;
+        item.speed_ranges = None;
+        assert!(effective_speed_ranges(&item).is_empty());
     }
 
     #[test]

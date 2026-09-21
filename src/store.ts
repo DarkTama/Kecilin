@@ -84,7 +84,8 @@ export type VideoFile = {
 export type FileState = VideoFile & {
   /** Zero ranges = whole file; one = plain trim; several = multi-part split. */
   trims: Trim[];
-  speedRange: SpeedRange | null;
+  /** Ordered, non-overlapping fast-forward ranges inside the trim. */
+  speedRanges: SpeedRange[];
   audio: AudioOpt;
   audioSource: AudioSource;
   normalize: boolean;
@@ -161,6 +162,7 @@ export type StoreState = {
   setNamingPattern: (pattern: string) => void;
   setDeleteSourceToTrash: (del: boolean) => void;
   setSpeedRange: (target: string | number, speedRange: SpeedRange | null) => void;
+  setSpeedRanges: (target: string | number, speedRanges: SpeedRange[]) => void;
   setTrimCustomName: (fileIndex: number, trimIndex: number, customName: string) => void;
 
   copyAudioToAll: (sourceIndex: number) => void;
@@ -173,7 +175,7 @@ export type Store = StoreState;
 const fresh = (f: VideoFile): FileState => ({
   ...f,
   trims: [],
-  speedRange: null,
+  speedRanges: [],
   audio: "keep",
   audioSource: "default",
   normalize: false,
@@ -307,11 +309,20 @@ export const useStore = create<Store>()(
       setStripMetadata: (stripMetadata) => set({ stripMetadata }),
       setNamingPattern: (namingPattern) => set({ namingPattern }),
       setDeleteSourceToTrash: (deleteSourceToTrash) => set({ deleteSourceToTrash }),
+      // Kept so older call sites keep compiling: one range in, list of one out.
       setSpeedRange: (target, speedRange) =>
         set((s) => ({
           files: s.files.map((f, i) =>
             (typeof target === "string" ? f.path === target : i === target)
-              ? { ...f, speedRange }
+              ? { ...f, speedRanges: speedRange ? [speedRange] : [] }
+              : f,
+          ),
+        })),
+      setSpeedRanges: (target, speedRanges) =>
+        set((s) => ({
+          files: s.files.map((f, i) =>
+            (typeof target === "string" ? f.path === target : i === target)
+              ? { ...f, speedRanges }
               : f,
           ),
         })),
