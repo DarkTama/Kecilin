@@ -737,64 +737,20 @@ pub(crate) fn build_speed_filtergraph(
         .map(|ts| ts.iter().filter(|t| t.enabled && t.volume > 0.001).collect())
         .unwrap_or_default();
 
-    let mut chains: Vec<String> = Vec::new();
-    let mut seg_labels: Vec<(String, Option<String>)> = Vec::new();
     let fmt = |n: f64| -> String { format!("{:.3}", n) };
-
-    let audio_src = if has_audio && !enabled.is_empty() {
-        if enabled.len() == 1 {
-            let t = enabled[0];
-            chains.push(format!("[0:a:{}]volume={:.3}[amixed]", t.index, t.volume));
-        } else {
-            let mut inputs = String::new();
-            for (i, t) in enabled.iter().enumerate() {
-                let label = format!("a{i}");
-                chains.push(format!("[0:a:{}]volume={:.3}[{label}]", t.index, t.volume));
-                inputs.push_str(&format!("[{label}]"));
-            }
-            chains.push(format!(
-                "{inputs}amix=inputs={}:duration=longest:normalize=0[amixed]",
-                enabled.len()
-            ));
-        }
-        "[amixed]"
-    } else {
-        "[0:a]"
-    };
-
-    // Emit one segment: video chain always, audio chain when the track is kept.
-    let emit = |chains: &mut Vec<String>,
-                seg_labels: &mut Vec<(String, Option<String>)>,
-                v_filters: String,
-                a_filters: String| {
-        let idx = seg_labels.len();
-        let v_label = format!("v{idx}");
-        chains.push(format!("[0:v]{v_filters}[{v_label}]"));
-        if has_audio {
-            let a_label = format!("a{idx}");
-            chains.push(format!("{audio_src}{a_filters}[{a_label}]"));
-            seg_labels.push((v_label, Some(a_label)));
-        } else {
-            seg_labels.push((v_label, None));
-        }
-    };
-
+    let mut segs: Vec<(String, String)> = Vec::new();
     let mut cursor = t_start;
     for r in &ranges {
         // Normal gap before this range (head gap included).
         if r.start > cursor + 0.001 {
-            emit(
-                &mut chains,
-                &mut seg_labels,
+            segs.push((
                 format!("trim=start={}:end={},setpts=PTS-STARTPTS", fmt(cursor), fmt(r.start)),
                 format!("atrim=start={}:end={},asetpts=PTS-STARTPTS", fmt(cursor), fmt(r.start)),
-            );
+            ));
         }
         // Sped segment.
         let atempo = build_atempo_chain(r.speed);
-        emit(
-            &mut chains,
-            &mut seg_labels,
+        segs.push((
             format!(
                 "trim=start={}:end={},setpts=PTS-STARTPTS,setpts=PTS/{:.3}",
                 fmt(r.start),
@@ -806,7 +762,7 @@ pub(crate) fn build_speed_filtergraph(
                 fmt(r.start),
                 fmt(r.end)
             ),
-        );
+        ));
         cursor = r.end;
     }
 
@@ -814,21 +770,68 @@ pub(crate) fn build_speed_filtergraph(
     match t_end {
         Some(te) => {
             if cursor < te - 0.001 {
-                emit(
-                    &mut chains,
-                    &mut seg_labels,
+                segs.push((
                     format!("trim=start={}:end={},setpts=PTS-STARTPTS", fmt(cursor), fmt(te)),
                     format!("atrim=start={}:end={},asetpts=PTS-STARTPTS", fmt(cursor), fmt(te)),
-                );
+                ));
             }
         }
         None => {
-            emit(
-                &mut chains,
-                &mut seg_labels,
+            segs.push((
                 format!("trim=start={},setpts=PTS-STARTPTS", fmt(cursor)),
                 format!("atrim=start={},asetpts=PTS-STARTPTS", fmt(cursor)),
-            );
+            ));
+        }
+    }
+
+    let seg_count = segs.len();
+    let mut chains: Vec<String> = Vec::new();
+    let mut seg_labels: Vec<(String, Option<String>)> = Vec::new();
+
+    let tracks_premixed = has_audio && !enabled.is_empty();
+    if tracks_premixed {
+        if enabled.len() == 1 {
+            let t = enabled[0];
+            chains.push(format!("[0:a:{}]volume={:.3}[amixed]", t.index, t.volume));
+        } else {
+            let mut inputs = String::new();
+            for (i, t) in enabled.iter().enumerate() {
+                let label = format!("track_a{i}");
+                chains.push(format!("[0:a:{}]volume={:.3}[{label}]", t.index, t.volume));
+                inputs.push_str(&format!("[{label}]"));
+            }
+            chains.push(format!(
+                "{inputs}amix=inputs={}:duration=longest:normalize=0[amixed]",
+                enabled.len()
+            ));
+        }
+        if seg_count > 1 {
+            let mut split_labels = String::new();
+            for i in 0..seg_count {
+                split_labels.push_str(&format!("[as{i}]"));
+            }
+            chains.push(format!("[amixed]asplit={seg_count}{split_labels}"));
+        }
+    }
+
+    for (idx, (v_filters, a_filters)) in segs.into_iter().enumerate() {
+        let v_label = format!("v{idx}");
+        chains.push(format!("[0:v]{v_filters}[{v_label}]"));
+        if has_audio {
+            let a_label = format!("a{idx}");
+            let a_in = if tracks_premixed {
+                if seg_count > 1 {
+                    format!("[as{idx}]")
+                } else {
+                    "[amixed]".to_string()
+                }
+            } else {
+                "[0:a]".to_string()
+            };
+            chains.push(format!("{a_in}{a_filters}[{a_label}]"));
+            seg_labels.push((v_label, Some(a_label)));
+        } else {
+            seg_labels.push((v_label, None));
         }
     }
 
@@ -2229,10 +2232,14 @@ mod tests {
         );
         let i = a.iter().position(|x| x == "-filter_complex").unwrap();
         let graph = &a[i + 1];
-        assert!(graph.contains("[0:a:0]volume=1.000[a0];[0:a:1]volume=1.400[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0[amixed]"));
-        assert!(graph.contains("[amixed]atrim=start=1.000:end=3.000,asetpts=PTS-STARTPTS[a0]"));
-        assert!(graph.contains("[amixed]atrim=start=3.000:end=6.000,asetpts=PTS-STARTPTS,atempo=2.000[a1]"));
-        assert!(graph.contains("[amixed]atrim=start=6.000:end=10.000,asetpts=PTS-STARTPTS[a2]"));
+        // Pre-mix uses track_a prefix to avoid collision with segment output labels
+        assert!(graph.contains("[0:a:0]volume=1.000[track_a0];[0:a:1]volume=1.400[track_a1];[track_a0][track_a1]amix=inputs=2:duration=longest:normalize=0[amixed]"));
+        // asplit splits amixed across the 3 segments
+        assert!(graph.contains("[amixed]asplit=3[as0][as1][as2]"));
+        // Segments use [as{idx}] instead of reusing [amixed]
+        assert!(graph.contains("[as0]atrim=start=1.000:end=3.000,asetpts=PTS-STARTPTS[a0]"));
+        assert!(graph.contains("[as1]atrim=start=3.000:end=6.000,asetpts=PTS-STARTPTS,atempo=2.000[a1]"));
+        assert!(graph.contains("[as2]atrim=start=6.000:end=10.000,asetpts=PTS-STARTPTS[a2]"));
         assert!(graph.contains("concat=n=3:v=1:a=1[vcat][acat]"));
         assert!(graph.contains(&format!("[acat]{}[aout]", LOUDNORM)));
         assert!(a.contains(&"[aout]".to_string()));
@@ -2271,7 +2278,46 @@ mod tests {
         let i = a.iter().position(|x| x == "-filter_complex").unwrap();
         let graph = &a[i + 1];
         assert!(graph.contains("[0:a:1]volume=1.500[amixed]"));
-        assert!(graph.contains("[amixed]atrim=start=1.000:end=3.000,asetpts=PTS-STARTPTS[a0]"));
+        assert!(graph.contains("[amixed]asplit=3[as0][as1][as2]"));
+        assert!(graph.contains("[as0]atrim=start=1.000:end=3.000,asetpts=PTS-STARTPTS[a0]"));
+    }
+
+    #[test]
+    fn speed_ranges_single_segment_with_multi_track_consumes_amixed_without_asplit() {
+        let p = builtin_preset("480p").unwrap();
+        let trim = Trim { start: 1.0, end: 5.0, custom_name: None };
+        let sr = SpeedRange {
+            start: 1.0,
+            end: 5.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+        ];
+        let opts = AudioOpts {
+            tracks_info: Some(&tracks),
+            ..Default::default()
+        };
+        let a = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            opts,
+            None,
+            &[],
+            false,
+            std::slice::from_ref(&sr),
+            None,
+        );
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
+        let graph = &a[i + 1];
+        assert!(graph.contains("[track_a0]"));
+        assert!(!graph.contains("asplit"));
+        assert!(graph.contains("[amixed]atrim=start=1.000:end=5.000,asetpts=PTS-STARTPTS,atempo=2.000[a0]"));
     }
 
     #[test]
