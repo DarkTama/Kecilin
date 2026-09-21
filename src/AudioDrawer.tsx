@@ -1,8 +1,55 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, memo } from "react";
 import { useT } from "./i18n";
 import { FileState, TrackInfo } from "./store";
 import { generateWaveformData } from "./audio/waveform";
 import { engine } from "./engine";
+
+const WaveformLaneView = memo(function WaveformLaneView({
+  peaks,
+  enabled,
+}: {
+  peaks?: Float32Array;
+  enabled: boolean;
+}) {
+  if (!peaks) return null;
+  return (
+    <svg
+      className={`w-full h-6 ${
+        enabled ? "text-emerald-500/75" : "text-slate-600"
+      }`}
+      viewBox={`0 0 ${peaks.length} 30`}
+      preserveAspectRatio="none"
+    >
+      {Array.from(peaks).map((val, idx) => {
+        if (val < 0.02) {
+          return (
+            <line
+              key={idx}
+              x1={idx}
+              y1={15}
+              x2={idx + 1}
+              y2={15}
+              stroke="currentColor"
+              strokeWidth="1"
+              opacity="0.3"
+            />
+          );
+        }
+        const h = Math.max(2, val * 26);
+        return (
+          <rect
+            key={idx}
+            x={idx}
+            y={15 - h / 2}
+            width="0.8"
+            height={h}
+            fill="currentColor"
+          />
+        );
+      })}
+    </svg>
+  );
+});
 
 export function AudioDrawer({
   file,
@@ -15,7 +62,7 @@ export function AudioDrawer({
 }) {
   const t = useT();
   const [waveforms, setWaveforms] = useState<Map<number, Float32Array>>(new Map());
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => (file.audioTracksInfo?.length ?? 0) > 0);
 
   const tracks = file.audioTracksInfo ?? [];
 
@@ -25,10 +72,12 @@ export function AudioDrawer({
       setLoading(true);
       const newWaves = new Map<number, Float32Array>();
       for (const track of tracks) {
+        if (!active) return;
         try {
           const url = await engine.extractTrackAudio(file.path, track.index);
           if (!active) return;
           const peaks = await generateWaveformData(url, 300);
+          if (!active) return;
           newWaves.set(track.index, peaks);
         } catch {
           // fallback to empty
@@ -129,44 +178,8 @@ export function AudioDrawer({
               </div>
 
               {/* Waveform Lane */}
-              <div className="relative h-8 w-full bg-slate-950 rounded border border-slate-800/80 overflow-hidden flex items-center px-1">
-                {peaks && (
-                  <svg
-                    className={`w-full h-6 ${
-                      track.enabled ? "text-emerald-500/75" : "text-slate-600"
-                    }`}
-                    viewBox={`0 0 ${peaks.length} 30`}
-                    preserveAspectRatio="none"
-                  >
-                    {Array.from(peaks).map((val, idx) => {
-                      if (val < 0.02) {
-                        return (
-                          <line
-                            key={idx}
-                            x1={idx}
-                            y1={15}
-                            x2={idx + 1}
-                            y2={15}
-                            stroke="currentColor"
-                            strokeWidth="1"
-                            opacity="0.3"
-                          />
-                        );
-                      }
-                      const h = Math.max(2, val * 26);
-                      return (
-                        <rect
-                          key={idx}
-                          x={idx}
-                          y={15 - h / 2}
-                          width="0.8"
-                          height={h}
-                          fill="currentColor"
-                        />
-                      );
-                    })}
-                  </svg>
-                )}
+              <div className="relative h-8 w-full bg-slate-950 rounded border border-slate-800/80 overflow-hidden flex items-center">
+                <WaveformLaneView peaks={peaks} enabled={track.enabled} />
                 {playheadPct != null && (
                   <div
                     className="absolute top-0 bottom-0 w-0.5 bg-cyan-400 shadow-[0_0_4px_#22d3ee]"
