@@ -213,6 +213,8 @@ pub struct BatchItem {
     #[serde(default)]
     pub audio_tracks: usize,
     #[serde(default)]
+    pub audio_tracks_info: Vec<AudioTrackMeta>,
+    #[serde(default)]
     #[allow(dead_code)]
     pub speed_range: Option<SpeedRange>,
     /// Several non-overlapping speed ranges inside one trim (preferred).
@@ -449,9 +451,34 @@ pub(crate) struct AudioOpts<'a> {
     pub normalize: bool,
     /// Audio stream count (merge needs it; <2 degrades to default).
     pub track_count: usize,
+    pub tracks_info: Option<&'a [AudioTrackMeta]>,
 }
 
 const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
+
+pub(crate) fn build_audio_filtergraph(tracks: &[AudioTrackMeta], normalize: bool) -> Option<String> {
+    let enabled: Vec<&AudioTrackMeta> = tracks.iter().filter(|t| t.enabled && t.volume > 0.001).collect();
+    if enabled.is_empty() {
+        return None;
+    }
+
+    let norm_chain = if normalize { format!(",{}", LOUDNORM) } else { String::new() };
+
+    if enabled.len() == 1 {
+        let t = enabled[0];
+        return Some(format!("[0:a:{}]volume={:.3}{norm_chain}[aout]", t.index, t.volume));
+    }
+
+    let mut parts = Vec::new();
+    let mut inputs = String::new();
+    for (i, t) in enabled.iter().enumerate() {
+        let label = format!("a{i}");
+        parts.push(format!("[0:a:{}]volume={:.3}[{label}]", t.index, t.volume));
+        inputs.push_str(&format!("[{label}]"));
+    }
+    parts.push(format!("{inputs}amix=inputs={}:duration=longest:normalize=0{norm_chain}[aout]", enabled.len()));
+    Some(parts.join(";"))
+}
 
 /// The video encoder block. None = libx264 exactly as compress.bat; the GPU
 /// encoders keep the same rate ceiling (maxrate/bufsize) and GOP, trading the
@@ -515,7 +542,14 @@ pub(crate) fn build_ffmpeg_args(
     let t_end = trim.map(|t| t.end).or(duration);
     let normalized = normalize_speed_ranges(speed_ranges, t_start, t_end);
     let is_speed_active = !normalized.is_empty();
-    let mute = audio.level == Some("mute");
+    let multi_track_graph = audio
+        .tracks_info
+        .and_then(|t| build_audio_filtergraph(t, audio.normalize));
+    let multi_track_all_disabled = audio
+        .tracks_info
+        .map(|t| !t.is_empty() && t.iter().all(|x| !x.enabled || x.volume <= 0.001))
+        .unwrap_or(false);
+    let mute = audio.level == Some("mute") || multi_track_all_disabled;
 
     let mut a: Vec<String> = vec!["-y".into()];
     if let Some(t) = trim {
@@ -562,7 +596,9 @@ pub(crate) fn build_ffmpeg_args(
         let vf = format!("scale=-2:{}:flags=lanczos", p.height);
         push_strs(&mut a, &["-map", "0:v:0"]);
         if !mute {
-            if merge {
+            if let Some(multi_graph) = multi_track_graph.as_deref() {
+                push_strs(&mut a, &["-filter_complex", multi_graph, "-map", "[aout]"]);
+            } else if merge {
                 // Explicit input labels; normalize=0 keeps each source at its
                 // recorded level; extra filters chain INSIDE the complex graph.
                 let inputs: String =
@@ -586,7 +622,7 @@ pub(crate) fn build_ffmpeg_args(
     if mute {
         push_strs(&mut a, &["-an"]);
     } else {
-        if !is_speed_active && !merge && !af.is_empty() {
+        if !is_speed_active && !merge && multi_track_graph.is_none() && !af.is_empty() {
             push_strs(&mut a, &["-af", &af.join(",")]);
         }
         push_strs(&mut a, &["-c:a", "aac", "-q:a", "2", "-ar", "48000", "-ac", "2"]);
@@ -1275,6 +1311,46 @@ pub async fn prepare_preview(app: AppHandle, path: String) -> Result<String, Str
 }
 
 #[tauri::command]
+pub async fn extract_track_audio(
+    app: AppHandle,
+    path: String,
+    index: usize,
+) -> Result<String, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("audio_tracks");
+    fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+
+    let hash = format!("{:016x}", stable_hash(&format!("{path}:{index}")));
+    let out_path = cache_dir.join(format!("{hash}.m4a"));
+    let out_str = out_path.to_str().ok_or("invalid utf-8 path")?.to_string();
+
+    if out_path.exists() {
+        return Ok(out_str);
+    }
+
+    let status = ffmpeg(&app)?
+        .args([
+            "-y", "-hide_banner", "-i", &path,
+            "-map", &format!("0:a:{index}"),
+            "-vn", "-c:a", "aac", "-b:a", "96k",
+            &out_str,
+        ])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !status.status.success() {
+        let _ = fs::remove_file(&out_path);
+        return Err("failed to demux audio track".into());
+    }
+
+    Ok(out_str)
+}
+
+#[tauri::command]
 pub async fn cancel_preview(app: AppHandle, path: String) -> Result<(), String> {
     if let Ok(mut cancelled) = PREVIEW_CANCELLED.lock() {
         cancelled.insert(path.clone());
@@ -1335,7 +1411,7 @@ pub async fn prepare_thumbnail(
 /// Drop cached previews/thumbnails older than a week. Called on startup.
 pub fn cleanup_cache(app: &AppHandle) {
     let Ok(base) = app.path().app_cache_dir() else { return };
-    for sub in ["previews", "thumbs"] {
+    for sub in ["previews", "thumbs", "audio_tracks"] {
         let Ok(rd) = fs::read_dir(base.join(sub)) else { continue };
         for entry in rd.flatten() {
             let old = entry
@@ -1794,6 +1870,11 @@ async fn convert_segment(
         level: item.audio.as_deref(),
         normalize: item.normalize,
         track_count: item.audio_tracks,
+        tracks_info: if item.audio_tracks_info.is_empty() {
+            None
+        } else {
+            Some(&item.audio_tracks_info)
+        },
     };
     let args = build_ffmpeg_args(
         &item.path,
@@ -2019,7 +2100,7 @@ mod tests {
 
     #[test]
     fn merge_builds_amix_graph_with_inner_chain() {
-        let opts = AudioOpts { source: Some("merge"), level: Some("50"), normalize: true, track_count: 2 };
+        let opts = AudioOpts { source: Some("merge"), level: Some("50"), normalize: true, track_count: 2, ..Default::default() };
         let a = args("in.mkv", "out.mp4", "480p", None, opts);
         let i = a.iter().position(|x| x == "-filter_complex").unwrap();
         assert_eq!(
@@ -2040,6 +2121,68 @@ mod tests {
         let a = args("in.mp4", "out.mp4", "480p", None, opts);
         let i = a.iter().position(|x| x == "-af").unwrap();
         assert_eq!(a[i + 1], LOUDNORM);
+    }
+
+    #[test]
+    fn multi_track_filtergraph_mixes_enabled_tracks_with_volume() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+            AudioTrackMeta { index: 2, name: "Music".into(), enabled: false, volume: 0.8 },
+        ];
+        let graph = build_audio_filtergraph(&tracks, false);
+        assert_eq!(
+            graph,
+            Some("[0:a:0]volume=1.000[a0];[0:a:1]volume=1.400[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0[aout]".to_string())
+        );
+    }
+
+    #[test]
+    fn multi_track_filtergraph_with_loudnorm() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+        ];
+        let graph = build_audio_filtergraph(&tracks, true);
+        assert_eq!(
+            graph,
+            Some(format!("[0:a:0]volume=1.000,{}[aout]", LOUDNORM))
+        );
+    }
+
+    #[test]
+    fn multi_track_audio_args_build_filtergraph() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+        ];
+        let opts = AudioOpts { tracks_info: Some(&tracks), ..Default::default() };
+        let a = args("in.mkv", "out.mp4", "480p", None, opts);
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
+        assert_eq!(
+            a[i + 1],
+            "[0:a:0]volume=1.000[a0];[0:a:1]volume=1.400[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0[aout]"
+        );
+        assert_eq!(&a[i + 2..i + 4], &["-map", "[aout]"]);
+        assert!(!a.iter().any(|x| x == "-af"));
+    }
+
+    #[test]
+    fn multi_track_audio_all_disabled_args_drops_audio() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: false, volume: 1.0 },
+        ];
+        let opts = AudioOpts { tracks_info: Some(&tracks), ..Default::default() };
+        let a = args("in.mkv", "out.mp4", "480p", None, opts);
+        assert!(a.contains(&"-an".to_string()));
+        assert!(!a.iter().any(|x| x == "-filter_complex"));
+    }
+
+    #[test]
+    fn multi_track_filtergraph_all_disabled_returns_none() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: false, volume: 1.0 },
+        ];
+        assert_eq!(build_audio_filtergraph(&tracks, false), None);
     }
 
     #[test]
@@ -2445,6 +2588,7 @@ Input #0, matroska,webm, from 'movie.mkv':
             audio_source: None,
             normalize: false,
             audio_tracks: 0,
+            audio_tracks_info: Vec::new(),
             speed_range: Some(mk_range(1.0, 2.0, 2.0)),
             speed_ranges: None,
         };
