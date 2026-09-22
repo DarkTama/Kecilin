@@ -2133,6 +2133,18 @@ mod tests {
     }
 
     #[test]
+    fn test_preview_target_height_clamping() {
+        // Default (no resolution given) falls back to 360.
+        assert_eq!(None::<u32>.unwrap_or(360).clamp(240, 1080), 360);
+        // Values within range pass through unchanged.
+        assert_eq!(Some(720u32).unwrap_or(360).clamp(240, 1080), 720);
+        // Values below the floor clamp up to 240.
+        assert_eq!(Some(100u32).unwrap_or(360).clamp(240, 1080), 240);
+        // Values above the ceiling clamp down to 1080.
+        assert_eq!(Some(4000u32).unwrap_or(360).clamp(240, 1080), 1080);
+    }
+
+    #[test]
     fn args_match_the_script_exactly() {
         let args = args("in.mp4", "out\\in_whatsapp_360p.mp4", "360p", None, AudioOpts::default());
         let expected: Vec<String> = [

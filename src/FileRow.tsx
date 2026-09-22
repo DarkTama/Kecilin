@@ -560,8 +560,8 @@ function TrimEditor({
   const fixedLen =
     lenMode === "30" ? 30 : lenMode === "custom" && customSecs >= 1 ? customSecs : null;
 
-  async function fallbackToProxy(targetRes: 360 | 720 | 1080 = previewRes) {
-    if (triedProxy.current) {
+  async function fallbackToProxy(targetRes: 360 | 720 | 1080 = previewRes, force = false) {
+    if (!force && triedProxy.current) {
       setPreview("none");
       return;
     }
@@ -1039,9 +1039,7 @@ function TrimEditor({
                 onClick={() => {
                   setPreviewRes(res);
                   setResMenuOpen(false);
-                  if (preview === "proxy") {
-                    void fallbackToProxy(res);
-                  }
+                  void fallbackToProxy(res, true);
                 }}
                 className={`flex w-full items-center justify-between rounded px-2 py-1 text-left text-xs ${
                   previewRes === res

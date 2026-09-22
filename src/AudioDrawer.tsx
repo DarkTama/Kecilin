@@ -103,14 +103,14 @@ export function AudioRack({
   const tracks = file.audioTracksInfo ?? [];
 
   return (
-    <div className={`rounded-lg border border-slate-800 bg-slate-950/90 p-3 space-y-3 ${className ?? ""}`}>
+    <div className={`rounded-lg border border-slate-800 bg-slate-950/90 p-3 space-y-3 flex flex-col justify-between ${className ?? ""}`}>
       <div className="flex items-center justify-between text-xs">
         <span className="font-semibold uppercase tracking-wider text-slate-300">
           {t("audioTracks")} ({tracks.length})
         </span>
       </div>
 
-      <div className="space-y-2.5">
+      <div className="space-y-2.5 overflow-y-auto flex-1 max-h-[220px] pr-1 custom-scroll">
         {tracks.map((track) => {
           const volPct = Math.round(track.volume * 100);
           const isBoosted = volPct > 100;
@@ -193,6 +193,9 @@ export function WaveformLanes({
   className?: string;
 }) {
   const tracks = file.audioTracksInfo ?? [];
+  const trackIndices = tracks.map((track) => track.index);
+  const internalWaves = useAudioWaveforms(file.path, waveforms ? [] : trackIndices);
+  const resolvedWaveforms = waveforms ?? internalWaves.waveforms;
 
   const playheadPct =
     file.duration && playhead != null
@@ -202,7 +205,7 @@ export function WaveformLanes({
   return (
     <div className={`space-y-2.5 ${className ?? ""}`}>
       {tracks.map((track) => {
-        const peaks = waveforms?.get(track.index);
+        const peaks = resolvedWaveforms.get(track.index);
         return (
           <div
             key={track.index}
