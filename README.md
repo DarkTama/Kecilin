@@ -22,7 +22,7 @@
 - **From result to WhatsApp in one motion** — done rows show the size saved, reveal in Explorer, copy to clipboard for Ctrl+V, or just drag the thumbnail straight into a chat. A toast fires when a batch finishes in the background.
 - **Guided choices** — each preset shows a worst-case size estimate for your queue, audio can be muted or turned down per file, and 30-second "Status mode" stamps fixed-length parts.
 - **Grows with you** — an Advanced panel (parallel conversions, overwrite policy, custom presets, GPU encoders, extra ffmpeg flags) stays out of the way until you want it; a `?` in the header explains the whole editor in plain words; skip a file mid-batch; an ETA on the progress bar; in-app updates; and a Bahasa Indonesia UI toggle.
-- **Multi-track audio, handled** — OBS-style recordings with separate game/mic tracks get a per-file source picker (any track, or merge them all), plus one-toggle loudness normalization.
+- **Multi-track audio studio & live mixer** — OBS recordings with separate game/mic tracks show real stream names ("Desktop Audio", "Mic / Auxiliary"). Pick any combination of tracks to export, balance or boost levels with dynamic 0–200% volume sliders (+gain for quiet mics), inspect audio activity on timeline-aligned waveform lanes to spot speech vs silence, and audition mix adjustments instantly through a live Web Audio preview mixer locked to video playback. Single-track videos get a compact inline volume slider without opening the drawer. One-toggle loudness normalization (`loudnorm`) balances final output.
 - **Real progress bars** — per file and per batch; a failed file is marked and the batch keeps going.
 - **Self-contained** — ffmpeg ships inside as a Tauri sidecar; nothing to install.
 
