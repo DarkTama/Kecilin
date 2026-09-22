@@ -32,6 +32,7 @@ pub fn run() {
             commands::prepare_thumbnail,
             commands::reveal_file,
             commands::copy_file_to_clipboard,
+            commands::extract_track_audio,
         ])
         .setup(|app| {
             commands::cleanup_cache(app.handle());

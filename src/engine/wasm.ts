@@ -338,4 +338,7 @@ export const wasmEngine: Engine = {
       throw new Error("could not extract a thumbnail");
     });
   },
+
+  extractTrackAudio: () =>
+    Promise.reject(new Error("extractTrackAudio is not available in the browser")),
 };

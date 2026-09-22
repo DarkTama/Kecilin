@@ -152,15 +152,23 @@ impl BatchState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioTrackMeta {
+    pub index: usize,
+    pub name: String,
+    pub enabled: bool,
+    pub volume: f32,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoFile {
-    path: String,
-    name: String,
-    size: u64,
-    duration: Option<f64>,
-    /// Number of audio streams (OBS multi-track recordings have several).
-    audio_tracks: usize,
+    pub path: String,
+    pub name: String,
+    pub size: u64,
+    pub duration: Option<f64>,
+    pub audio_tracks: usize,
+    pub audio_tracks_info: Vec<AudioTrackMeta>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -204,6 +212,8 @@ pub struct BatchItem {
     /// Audio stream count from the scan (needed to build the merge filter).
     #[serde(default)]
     pub audio_tracks: usize,
+    #[serde(default)]
+    pub audio_tracks_info: Vec<AudioTrackMeta>,
     #[serde(default)]
     #[allow(dead_code)]
     pub speed_range: Option<SpeedRange>,
@@ -282,11 +292,87 @@ struct BatchDone {
 }
 
 /// Count audio streams in ffmpeg's stderr header (`Stream #0:1...: Audio: …`).
+#[cfg(test)]
 pub(crate) fn parse_audio_tracks(stderr: &str) -> usize {
     stderr
         .lines()
         .filter(|l| l.contains("Stream #") && l.contains("Audio:"))
         .count()
+}
+
+pub(crate) fn parse_audio_tracks_info(stderr: &str) -> Vec<AudioTrackMeta> {
+    let mut tracks = Vec::new();
+    let mut current_idx = None;
+    let mut current_title: Option<String> = None;
+
+    let flush_track = |tracks: &mut Vec<AudioTrackMeta>, idx: &mut Option<usize>, title: &mut Option<String>| {
+        if let Some(i) = idx.take() {
+            let name = title.take().unwrap_or_else(|| format!("Track {}", i + 1));
+            tracks.push(AudioTrackMeta {
+                index: i,
+                name,
+                enabled: false,
+                volume: 1.0,
+            });
+        }
+    };
+
+    let lines: Vec<&str> = stderr.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.contains("Stream #") {
+            flush_track(&mut tracks, &mut current_idx, &mut current_title);
+            if line.contains("Audio:") {
+                current_idx = Some(tracks.len());
+            }
+        } else if line.contains("Chapter #") || (!line.starts_with(' ') && !line.starts_with('\t') && !line.trim().is_empty()) {
+            flush_track(&mut tracks, &mut current_idx, &mut current_title);
+        } else if current_idx.is_some() && line.contains(':') {
+            if let Some(pos) = line.find(':') {
+                let key = line[..pos].trim();
+                if key.eq_ignore_ascii_case("title") {
+                    let t = line[pos + 1..].trim().to_string();
+                    if !t.is_empty() {
+                        current_title = Some(t);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    flush_track(&mut tracks, &mut current_idx, &mut current_title);
+
+    if tracks.len() == 1 {
+        tracks[0].enabled = true;
+    } else if tracks.len() > 1 {
+        let has_master = tracks.iter().any(|t| {
+            let l = t.name.to_lowercase();
+            l.contains("master") || l.contains("all audio")
+        });
+        if has_master {
+            for t in tracks.iter_mut() {
+                let l = t.name.to_lowercase();
+                if l.contains("master") || l.contains("all audio") {
+                    t.enabled = true;
+                    break;
+                }
+            }
+        } else {
+            // Enable recognized primary sources (Desktop/Game and Mic/Aux) or default to Track 1
+            for t in tracks.iter_mut() {
+                let l = t.name.to_lowercase();
+                if l.contains("desktop") || l.contains("game") || l.contains("mic") || l.contains("aux") {
+                    t.enabled = true;
+                }
+            }
+            if !tracks.iter().any(|t| t.enabled) {
+                tracks[0].enabled = true;
+            }
+        }
+    }
+
+    tracks
 }
 
 /// Parse the primary video and audio codecs from ffmpeg stderr header.
@@ -366,9 +452,37 @@ pub(crate) struct AudioOpts<'a> {
     pub normalize: bool,
     /// Audio stream count (merge needs it; <2 degrades to default).
     pub track_count: usize,
+    pub tracks_info: Option<&'a [AudioTrackMeta]>,
 }
 
 const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
+
+pub(crate) fn build_audio_filtergraph(tracks: &[AudioTrackMeta], normalize: bool) -> Option<String> {
+    let enabled: Vec<&AudioTrackMeta> = tracks
+        .iter()
+        .filter(|t| t.enabled && t.volume.is_finite() && t.volume > 0.001)
+        .collect();
+    if enabled.is_empty() {
+        return None;
+    }
+
+    let norm_chain = if normalize { format!(",{}", LOUDNORM) } else { String::new() };
+
+    if enabled.len() == 1 {
+        let t = enabled[0];
+        return Some(format!("[0:a:{}]volume={:.3}{norm_chain}[aout]", t.index, t.volume));
+    }
+
+    let mut parts = Vec::new();
+    let mut inputs = String::new();
+    for (i, t) in enabled.iter().enumerate() {
+        let label = format!("a{i}");
+        parts.push(format!("[0:a:{}]volume={:.3}[{label}]", t.index, t.volume));
+        inputs.push_str(&format!("[{label}]"));
+    }
+    parts.push(format!("{inputs}amix=inputs={}:duration=longest:normalize=0{norm_chain}[aout]", enabled.len()));
+    Some(parts.join(";"))
+}
 
 /// The video encoder block. None = libx264 exactly as compress.bat; the GPU
 /// encoders keep the same rate ceiling (maxrate/bufsize) and GOP, trading the
@@ -432,7 +546,18 @@ pub(crate) fn build_ffmpeg_args(
     let t_end = trim.map(|t| t.end).or(duration);
     let normalized = normalize_speed_ranges(speed_ranges, t_start, t_end);
     let is_speed_active = !normalized.is_empty();
-    let mute = audio.level == Some("mute");
+    let multi_track_graph = audio
+        .tracks_info
+        .and_then(|t| build_audio_filtergraph(t, audio.normalize));
+    let multi_track_all_disabled = audio
+        .tracks_info
+        .map(|t| !t.is_empty() && t.iter().all(|x| !x.enabled || !x.volume.is_finite() || x.volume <= 0.001))
+        .unwrap_or(false);
+    let mute = audio.level == Some("mute") || multi_track_all_disabled;
+    let tracks_premixed = audio
+        .tracks_info
+        .map(|t| t.iter().any(|x| x.enabled && x.volume.is_finite() && x.volume > 0.001))
+        .unwrap_or(false);
 
     let mut a: Vec<String> = vec!["-y".into()];
     if let Some(t) = trim {
@@ -467,9 +592,10 @@ pub(crate) fn build_ffmpeg_args(
             &normalized,
             p.height,
             !mute,
-            audio.level,
+            if tracks_premixed { None } else { audio.level },
             audio.normalize,
             duration,
+            audio.tracks_info,
         );
         push_strs(&mut a, &["-filter_complex", &graph]);
         for m in maps {
@@ -479,7 +605,9 @@ pub(crate) fn build_ffmpeg_args(
         let vf = format!("scale=-2:{}:flags=lanczos", p.height);
         push_strs(&mut a, &["-map", "0:v:0"]);
         if !mute {
-            if merge {
+            if let Some(multi_graph) = multi_track_graph.as_deref() {
+                push_strs(&mut a, &["-filter_complex", multi_graph, "-map", "[aout]"]);
+            } else if merge {
                 // Explicit input labels; normalize=0 keeps each source at its
                 // recorded level; extra filters chain INSIDE the complex graph.
                 let inputs: String =
@@ -503,7 +631,7 @@ pub(crate) fn build_ffmpeg_args(
     if mute {
         push_strs(&mut a, &["-an"]);
     } else {
-        if !is_speed_active && !merge && !af.is_empty() {
+        if !is_speed_active && !merge && multi_track_graph.is_none() && !af.is_empty() {
             push_strs(&mut a, &["-af", &af.join(",")]);
         }
         push_strs(&mut a, &["-c:a", "aac", "-q:a", "2", "-ar", "48000", "-ac", "2"]);
@@ -606,49 +734,31 @@ pub(crate) fn build_speed_filtergraph(
     audio_level: Option<&str>,
     normalize: bool,
     duration: Option<f64>,
+    tracks_info: Option<&[AudioTrackMeta]>,
 ) -> (String, Vec<String>) {
     let t_start = trim.map(|t| t.start).unwrap_or(0.0);
     let t_end = trim.map(|t| t.end).or(duration);
 
     let ranges = normalize_speed_ranges(speed_ranges, t_start, t_end);
 
-    let mut chains: Vec<String> = Vec::new();
-    let mut seg_labels: Vec<(String, Option<String>)> = Vec::new();
+    let enabled: Vec<&AudioTrackMeta> = tracks_info
+        .map(|ts| ts.iter().filter(|t| t.enabled && t.volume.is_finite() && t.volume > 0.001).collect())
+        .unwrap_or_default();
+
     let fmt = |n: f64| -> String { format!("{:.3}", n) };
-
-    // Emit one segment: video chain always, audio chain when the track is kept.
-    let emit = |chains: &mut Vec<String>,
-                seg_labels: &mut Vec<(String, Option<String>)>,
-                v_filters: String,
-                a_filters: String| {
-        let idx = seg_labels.len();
-        let v_label = format!("v{idx}");
-        chains.push(format!("[0:v]{v_filters}[{v_label}]"));
-        if has_audio {
-            let a_label = format!("a{idx}");
-            chains.push(format!("[0:a]{a_filters}[{a_label}]"));
-            seg_labels.push((v_label, Some(a_label)));
-        } else {
-            seg_labels.push((v_label, None));
-        }
-    };
-
+    let mut segs: Vec<(String, String)> = Vec::new();
     let mut cursor = t_start;
     for r in &ranges {
         // Normal gap before this range (head gap included).
         if r.start > cursor + 0.001 {
-            emit(
-                &mut chains,
-                &mut seg_labels,
+            segs.push((
                 format!("trim=start={}:end={},setpts=PTS-STARTPTS", fmt(cursor), fmt(r.start)),
                 format!("atrim=start={}:end={},asetpts=PTS-STARTPTS", fmt(cursor), fmt(r.start)),
-            );
+            ));
         }
         // Sped segment.
         let atempo = build_atempo_chain(r.speed);
-        emit(
-            &mut chains,
-            &mut seg_labels,
+        segs.push((
             format!(
                 "trim=start={}:end={},setpts=PTS-STARTPTS,setpts=PTS/{:.3}",
                 fmt(r.start),
@@ -660,7 +770,7 @@ pub(crate) fn build_speed_filtergraph(
                 fmt(r.start),
                 fmt(r.end)
             ),
-        );
+        ));
         cursor = r.end;
     }
 
@@ -668,21 +778,68 @@ pub(crate) fn build_speed_filtergraph(
     match t_end {
         Some(te) => {
             if cursor < te - 0.001 {
-                emit(
-                    &mut chains,
-                    &mut seg_labels,
+                segs.push((
                     format!("trim=start={}:end={},setpts=PTS-STARTPTS", fmt(cursor), fmt(te)),
                     format!("atrim=start={}:end={},asetpts=PTS-STARTPTS", fmt(cursor), fmt(te)),
-                );
+                ));
             }
         }
         None => {
-            emit(
-                &mut chains,
-                &mut seg_labels,
+            segs.push((
                 format!("trim=start={},setpts=PTS-STARTPTS", fmt(cursor)),
                 format!("atrim=start={},asetpts=PTS-STARTPTS", fmt(cursor)),
-            );
+            ));
+        }
+    }
+
+    let seg_count = segs.len();
+    let mut chains: Vec<String> = Vec::new();
+    let mut seg_labels: Vec<(String, Option<String>)> = Vec::new();
+
+    let tracks_premixed = has_audio && !enabled.is_empty();
+    if tracks_premixed {
+        if enabled.len() == 1 {
+            let t = enabled[0];
+            chains.push(format!("[0:a:{}]volume={:.3}[amixed]", t.index, t.volume));
+        } else {
+            let mut inputs = String::new();
+            for (i, t) in enabled.iter().enumerate() {
+                let label = format!("track_a{i}");
+                chains.push(format!("[0:a:{}]volume={:.3}[{label}]", t.index, t.volume));
+                inputs.push_str(&format!("[{label}]"));
+            }
+            chains.push(format!(
+                "{inputs}amix=inputs={}:duration=longest:normalize=0[amixed]",
+                enabled.len()
+            ));
+        }
+        if seg_count > 1 {
+            let mut split_labels = String::new();
+            for i in 0..seg_count {
+                split_labels.push_str(&format!("[as{i}]"));
+            }
+            chains.push(format!("[amixed]asplit={seg_count}{split_labels}"));
+        }
+    }
+
+    for (idx, (v_filters, a_filters)) in segs.into_iter().enumerate() {
+        let v_label = format!("v{idx}");
+        chains.push(format!("[0:v]{v_filters}[{v_label}]"));
+        if has_audio {
+            let a_label = format!("a{idx}");
+            let a_in = if tracks_premixed {
+                if seg_count > 1 {
+                    format!("[as{idx}]")
+                } else {
+                    "[amixed]".to_string()
+                }
+            } else {
+                "[0:a]".to_string()
+            };
+            chains.push(format!("{a_in}{a_filters}[{a_label}]"));
+            seg_labels.push((v_label, Some(a_label)));
+        } else {
+            seg_labels.push((v_label, None));
         }
     }
 
@@ -713,7 +870,8 @@ pub(crate) fn build_speed_filtergraph(
         if normalize {
             af.push(LOUDNORM.to_string());
         }
-        match audio_level {
+        let effective_audio_level = if tracks_premixed { None } else { audio_level };
+        match effective_audio_level {
             Some("75") => af.push("volume=0.75".into()),
             Some("50") => af.push("volume=0.5".into()),
             Some("25") => af.push("volume=0.25".into()),
@@ -835,15 +993,24 @@ async fn probe_files(
     let mut files = Vec::with_capacity(found.len());
     for (p, name, size) in found {
         let path_str = p.to_str().unwrap().to_string(); // UTF-8 checked by callers
-        let (duration, audio_tracks) =
+        let (duration, audio_tracks, audio_tracks_info) =
             match ffmpeg(app)?.args(["-hide_banner", "-i", &path_str]).output().await {
                 Ok(out) => {
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    (parse_duration_secs(&stderr), parse_audio_tracks(&stderr))
+                    let info = parse_audio_tracks_info(&stderr);
+                    let count = info.len();
+                    (parse_duration_secs(&stderr), count, info)
                 }
-                Err(_) => (None, 0),
+                Err(_) => (None, 0, Vec::new()),
             };
-        files.push(VideoFile { path: path_str, name, size, duration, audio_tracks });
+        files.push(VideoFile {
+            path: path_str,
+            name,
+            size,
+            duration,
+            audio_tracks,
+            audio_tracks_info,
+        });
     }
     Ok(files)
 }
@@ -1182,6 +1349,72 @@ pub async fn prepare_preview(app: AppHandle, path: String) -> Result<String, Str
     Ok(out_str)
 }
 
+static DEMUX_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[tauri::command]
+pub async fn extract_track_audio(
+    app: AppHandle,
+    path: String,
+    index: usize,
+) -> Result<String, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("audio_tracks");
+    fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+
+    let (mtime, size) = fs::metadata(&path)
+        .map(|m| {
+            let mt = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (mt, m.len())
+        })
+        .unwrap_or((0, 0));
+    let hash = format!("{:x}", stable_hash(&format!("{path}|{mtime}|{size}:{index}")));
+    let out_path = cache_dir.join(format!("{hash}.m4a"));
+    let out_str = out_path.to_str().ok_or("invalid utf-8 path")?.to_string();
+
+    if out_path.exists() {
+        return Ok(out_str);
+    }
+
+    let pid = std::process::id();
+    let counter = DEMUX_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = cache_dir.join(format!("{hash}.tmp.{pid}_{counter}.m4a"));
+    let tmp_str = tmp_path.to_str().ok_or("invalid utf-8 path")?.to_string();
+
+    let status = ffmpeg(&app)?
+        .args([
+            "-y", "-hide_banner", "-i", &path,
+            "-map", &format!("0:a:{index}"),
+            "-vn", "-c:a", "aac", "-b:a", "96k",
+            &tmp_str,
+        ])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !status.status.success() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err("failed to demux audio track".into());
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, &out_path) {
+        if !out_path.exists() {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("failed to move extracted track: {e}"));
+        }
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    Ok(out_str)
+}
+
 #[tauri::command]
 pub async fn cancel_preview(app: AppHandle, path: String) -> Result<(), String> {
     if let Ok(mut cancelled) = PREVIEW_CANCELLED.lock() {
@@ -1243,7 +1476,7 @@ pub async fn prepare_thumbnail(
 /// Drop cached previews/thumbnails older than a week. Called on startup.
 pub fn cleanup_cache(app: &AppHandle) {
     let Ok(base) = app.path().app_cache_dir() else { return };
-    for sub in ["previews", "thumbs"] {
+    for sub in ["previews", "thumbs", "audio_tracks"] {
         let Ok(rd) = fs::read_dir(base.join(sub)) else { continue };
         for entry in rd.flatten() {
             let old = entry
@@ -1702,6 +1935,11 @@ async fn convert_segment(
         level: item.audio.as_deref(),
         normalize: item.normalize,
         track_count: item.audio_tracks,
+        tracks_info: if item.audio_tracks_info.is_empty() {
+            None
+        } else {
+            Some(&item.audio_tracks_info)
+        },
     };
     let args = build_ffmpeg_args(
         &item.path,
@@ -1927,7 +2165,7 @@ mod tests {
 
     #[test]
     fn merge_builds_amix_graph_with_inner_chain() {
-        let opts = AudioOpts { source: Some("merge"), level: Some("50"), normalize: true, track_count: 2 };
+        let opts = AudioOpts { source: Some("merge"), level: Some("50"), normalize: true, track_count: 2, ..Default::default() };
         let a = args("in.mkv", "out.mp4", "480p", None, opts);
         let i = a.iter().position(|x| x == "-filter_complex").unwrap();
         assert_eq!(
@@ -1948,6 +2186,298 @@ mod tests {
         let a = args("in.mp4", "out.mp4", "480p", None, opts);
         let i = a.iter().position(|x| x == "-af").unwrap();
         assert_eq!(a[i + 1], LOUDNORM);
+    }
+
+    #[test]
+    fn multi_track_filtergraph_mixes_enabled_tracks_with_volume() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+            AudioTrackMeta { index: 2, name: "Music".into(), enabled: false, volume: 0.8 },
+        ];
+        let graph = build_audio_filtergraph(&tracks, false);
+        assert_eq!(
+            graph,
+            Some("[0:a:0]volume=1.000[a0];[0:a:1]volume=1.400[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0[aout]".to_string())
+        );
+    }
+
+    #[test]
+    fn multi_track_filtergraph_multi_track_with_loudnorm() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+        ];
+        let graph = build_audio_filtergraph(&tracks, true);
+        assert_eq!(
+            graph,
+            Some(format!(
+                "[0:a:0]volume=1.000[a0];[0:a:1]volume=1.400[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0,{}[aout]",
+                LOUDNORM
+            ))
+        );
+    }
+
+    #[test]
+    fn speed_ranges_with_multi_track_audio_uses_amixed_in_segments() {
+        let p = builtin_preset("480p").unwrap();
+        let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
+        let sr = SpeedRange {
+            start: 3.0,
+            end: 6.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+        ];
+        let opts = AudioOpts {
+            tracks_info: Some(&tracks),
+            normalize: true,
+            ..Default::default()
+        };
+        let a = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            opts,
+            None,
+            &[],
+            false,
+            std::slice::from_ref(&sr),
+            None,
+        );
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
+        let graph = &a[i + 1];
+        // Pre-mix uses track_a prefix to avoid collision with segment output labels
+        assert!(graph.contains("[0:a:0]volume=1.000[track_a0];[0:a:1]volume=1.400[track_a1];[track_a0][track_a1]amix=inputs=2:duration=longest:normalize=0[amixed]"));
+        // asplit splits amixed across the 3 segments
+        assert!(graph.contains("[amixed]asplit=3[as0][as1][as2]"));
+        // Segments use [as{idx}] instead of reusing [amixed]
+        assert!(graph.contains("[as0]atrim=start=1.000:end=3.000,asetpts=PTS-STARTPTS[a0]"));
+        assert!(graph.contains("[as1]atrim=start=3.000:end=6.000,asetpts=PTS-STARTPTS,atempo=2.000[a1]"));
+        assert!(graph.contains("[as2]atrim=start=6.000:end=10.000,asetpts=PTS-STARTPTS[a2]"));
+        assert!(graph.contains("concat=n=3:v=1:a=1[vcat][acat]"));
+        assert!(graph.contains(&format!("[acat]{}[aout]", LOUDNORM)));
+        assert!(a.contains(&"[aout]".to_string()));
+    }
+
+    #[test]
+    fn speed_ranges_with_multi_track_does_not_append_volume_filter_after_concat() {
+        let p = builtin_preset("480p").unwrap();
+        let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
+        let sr = SpeedRange {
+            start: 3.0,
+            end: 6.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 0.8 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+        ];
+        let opts = AudioOpts {
+            tracks_info: Some(&tracks),
+            level: Some("50"),
+            normalize: false,
+            ..Default::default()
+        };
+        let a = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            opts,
+            None,
+            &[],
+            false,
+            std::slice::from_ref(&sr),
+            None,
+        );
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
+        let graph = &a[i + 1];
+        assert!(graph.contains("[0:a:0]volume=0.800[track_a0]"));
+        assert!(graph.contains("[0:a:1]volume=1.400[track_a1]"));
+        assert!(graph.contains("concat=n=3:v=1:a=1[vcat][acat]"));
+        // Post-concat [acat] should NOT have volume filter
+        assert!(!graph.contains("volume=0.5"));
+        assert!(!graph.contains("[acat]volume"));
+        // Final audio map directly references [acat]
+        assert!(a.contains(&"[acat]".to_string()));
+    }
+
+    #[test]
+    fn speed_ranges_with_single_track_multi_audio_uses_amixed_in_segments() {
+        let p = builtin_preset("480p").unwrap();
+        let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
+        let sr = SpeedRange {
+            start: 3.0,
+            end: 6.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let tracks = vec![
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.5 },
+        ];
+        let opts = AudioOpts {
+            tracks_info: Some(&tracks),
+            ..Default::default()
+        };
+        let a = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            opts,
+            None,
+            &[],
+            false,
+            std::slice::from_ref(&sr),
+            None,
+        );
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
+        let graph = &a[i + 1];
+        assert!(graph.contains("[0:a:1]volume=1.500[amixed]"));
+        assert!(graph.contains("[amixed]asplit=3[as0][as1][as2]"));
+        assert!(graph.contains("[as0]atrim=start=1.000:end=3.000,asetpts=PTS-STARTPTS[a0]"));
+    }
+
+    #[test]
+    fn speed_ranges_single_segment_with_multi_track_consumes_amixed_without_asplit() {
+        let p = builtin_preset("480p").unwrap();
+        let trim = Trim { start: 1.0, end: 5.0, custom_name: None };
+        let sr = SpeedRange {
+            start: 1.0,
+            end: 5.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+        ];
+        let opts = AudioOpts {
+            tracks_info: Some(&tracks),
+            ..Default::default()
+        };
+        let a = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            opts,
+            None,
+            &[],
+            false,
+            std::slice::from_ref(&sr),
+            None,
+        );
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
+        let graph = &a[i + 1];
+        assert!(graph.contains("[track_a0]"));
+        assert!(!graph.contains("asplit"));
+        assert!(graph.contains("[amixed]atrim=start=1.000:end=5.000,asetpts=PTS-STARTPTS,atempo=2.000[a0]"));
+    }
+
+    #[test]
+    fn speed_ranges_with_all_tracks_disabled_drops_audio() {
+        let p = builtin_preset("480p").unwrap();
+        let trim = Trim { start: 1.0, end: 10.0, custom_name: None };
+        let sr = SpeedRange {
+            start: 3.0,
+            end: 6.0,
+            speed: 2.0,
+            fit_target: false,
+            target_duration: None,
+        };
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: false, volume: 1.0 },
+        ];
+        let opts = AudioOpts {
+            tracks_info: Some(&tracks),
+            ..Default::default()
+        };
+        let a = build_ffmpeg_args(
+            "in.mp4",
+            "out.mp4",
+            &p,
+            Some(&trim),
+            opts,
+            None,
+            &[],
+            false,
+            std::slice::from_ref(&sr),
+            None,
+        );
+        assert!(a.contains(&"-an".to_string()));
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
+        let graph = &a[i + 1];
+        assert!(!graph.contains("amixed"));
+        assert!(!graph.contains("atrim"));
+        assert!(graph.contains("concat=n=3:v=1:a=0[vcat]"));
+    }
+
+    #[test]
+    fn multi_track_filtergraph_with_loudnorm() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+        ];
+        let graph = build_audio_filtergraph(&tracks, true);
+        assert_eq!(
+            graph,
+            Some(format!("[0:a:0]volume=1.000,{}[aout]", LOUDNORM))
+        );
+    }
+
+    #[test]
+    fn multi_track_audio_args_build_filtergraph() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: 1.0 },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: 1.4 },
+        ];
+        let opts = AudioOpts { tracks_info: Some(&tracks), ..Default::default() };
+        let a = args("in.mkv", "out.mp4", "480p", None, opts);
+        let i = a.iter().position(|x| x == "-filter_complex").unwrap();
+        assert_eq!(
+            a[i + 1],
+            "[0:a:0]volume=1.000[a0];[0:a:1]volume=1.400[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0[aout]"
+        );
+        assert_eq!(&a[i + 2..i + 4], &["-map", "[aout]"]);
+        assert!(!a.iter().any(|x| x == "-af"));
+    }
+
+    #[test]
+    fn multi_track_audio_all_disabled_args_drops_audio() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: false, volume: 1.0 },
+        ];
+        let opts = AudioOpts { tracks_info: Some(&tracks), ..Default::default() };
+        let a = args("in.mkv", "out.mp4", "480p", None, opts);
+        assert!(a.contains(&"-an".to_string()));
+        assert!(!a.iter().any(|x| x == "-filter_complex"));
+    }
+
+    #[test]
+    fn multi_track_filtergraph_all_disabled_returns_none() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: false, volume: 1.0 },
+        ];
+        assert_eq!(build_audio_filtergraph(&tracks, false), None);
+    }
+
+    #[test]
+    fn multi_track_filtergraph_ignores_non_finite_volume() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: f32::NAN },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: f32::INFINITY },
+        ];
+        assert_eq!(build_audio_filtergraph(&tracks, false), None);
     }
 
     #[test]
@@ -2045,6 +2575,72 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
     }
 
     #[test]
+    fn parses_audio_track_titles_from_ffmpeg_header() {
+        let stderr = r#"
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'obs.mp4':
+  Duration: 00:01:30.00, start: 0.000000, bitrate: 12000 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High)
+  Stream #0:1[0x2](und): Audio: aac (LC), 48000 Hz, stereo, fltp, 320 kb/s (default)
+    Metadata:
+      title           : Desktop Audio
+  Stream #0:2[0x3](und): Audio: aac (LC), 48000 Hz, stereo, fltp, 320 kb/s
+    Metadata:
+      title           : Mic / Auxiliary
+  Stream #0:3[0x4](und): Audio: aac (LC), 48000 Hz, stereo, fltp, 320 kb/s
+    Metadata:
+      title           : Discord
+"#;
+        let tracks = parse_audio_tracks_info(stderr);
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].index, 0);
+        assert_eq!(tracks[0].name, "Desktop Audio");
+        assert!(tracks[0].enabled);
+        assert_eq!(tracks[1].index, 1);
+        assert_eq!(tracks[1].name, "Mic / Auxiliary");
+        assert!(tracks[1].enabled);
+        assert_eq!(tracks[2].index, 2);
+        assert_eq!(tracks[2].name, "Discord");
+        assert!(!tracks[2].enabled);
+    }
+
+    #[test]
+    fn parses_audio_tracks_fallback_without_metadata() {
+        let stderr = r#"
+  Stream #0:1: Audio: aac, 48000 Hz, stereo
+  Stream #0:2: Audio: aac, 48000 Hz, stereo
+"#;
+        let tracks = parse_audio_tracks_info(stderr);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].name, "Track 1");
+        assert!(tracks[0].enabled);
+        assert_eq!(tracks[1].name, "Track 2");
+        assert!(!tracks[1].enabled);
+    }
+
+    #[test]
+    fn parses_audio_track_not_overwritten_by_subsequent_subtitle_or_chapter() {
+        let stderr = r#"
+Input #0, matroska,webm, from 'movie.mkv':
+  Duration: 00:05:00.00, start: 0.000000, bitrate: 4000 kb/s
+  Stream #0:0: Video: h264 (High)
+  Stream #0:1: Audio: aac, 48000 Hz, stereo
+    Metadata:
+      title           : English Audio
+  Stream #0:2: Subtitle: subrip
+    Metadata:
+      title           : Commentary Subtitles
+  Chapter #0:0: start 0.000000, end 10.000000
+    Metadata:
+      title           : Chapter 1
+"#;
+        let tracks = parse_audio_tracks_info(stderr);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].index, 0);
+        assert_eq!(tracks[0].name, "English Audio");
+        assert!(tracks[0].enabled);
+    }
+
+    #[test]
     fn walk_skips_output_folders_when_recursive() {
         let dir = std::env::temp_dir().join(format!("kecilin-walk-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -2113,6 +2709,7 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
             Some("50"),
             true,
             None,
+            None,
         );
         assert!(graph.contains("[0:v]trim=start=1.000:end=3.000,setpts=PTS-STARTPTS[v0]"));
         assert!(graph.contains("[0:v]trim=start=3.000:end=6.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v1]"));
@@ -2135,6 +2732,7 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
             Some("50"),
             true,
             None,
+            None,
         );
         let expected = [
             "[0:v]trim=start=1.000:end=3.000,setpts=PTS-STARTPTS[v0]".to_string(),
@@ -2156,7 +2754,7 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
         let trim = Trim { start: 1.0, end: 20.0, custom_name: None };
         let ranges = vec![mk_range(3.0, 6.0, 2.0), mk_range(10.0, 12.0, 4.0)];
         let (graph, _) =
-            build_speed_filtergraph(Some(&trim), &ranges, 480, true, None, false, None);
+            build_speed_filtergraph(Some(&trim), &ranges, 480, true, None, false, None, None);
         assert!(graph.contains("[0:v]trim=start=1.000:end=3.000,setpts=PTS-STARTPTS[v0]"));
         assert!(graph.contains("[0:v]trim=start=3.000:end=6.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v1]"));
         assert!(graph.contains("[0:v]trim=start=6.000:end=10.000,setpts=PTS-STARTPTS[v2]"));
@@ -2171,7 +2769,7 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
         let trim = Trim { start: 1.0, end: 20.0, custom_name: None };
         let ranges = vec![mk_range(1.0, 4.0, 2.0), mk_range(10.0, 12.0, 2.0)];
         let (graph, _) =
-            build_speed_filtergraph(Some(&trim), &ranges, 480, true, None, false, None);
+            build_speed_filtergraph(Some(&trim), &ranges, 480, true, None, false, None, None);
         assert!(graph.contains("[0:v]trim=start=1.000:end=4.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v0]"));
         assert!(graph.contains("[0:v]trim=start=4.000:end=10.000,setpts=PTS-STARTPTS[v1]"));
         assert!(graph.contains("[0:v]trim=start=10.000:end=12.000,setpts=PTS-STARTPTS,setpts=PTS/2.000[v2]"));
@@ -2287,6 +2885,7 @@ Stream #0:2(und): Audio: aac, 48000 Hz\n    Stream #0:3: Subtitle: ass\n";
             audio_source: None,
             normalize: false,
             audio_tracks: 0,
+            audio_tracks_info: Vec::new(),
             speed_range: Some(mk_range(1.0, 2.0, 2.0)),
             speed_ranges: None,
         };
