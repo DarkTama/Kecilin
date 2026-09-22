@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AudioDrawer } from "./AudioDrawer";
+import { AudioDrawer, AudioRack, WaveformLanes } from "./AudioDrawer";
 import type { FileState } from "./store";
 
 describe("AudioDrawer", () => {
@@ -68,6 +68,89 @@ describe("AudioDrawer", () => {
       <AudioDrawer file={emptyFile} playhead={null} onTrackChange={vi.fn()} />
     );
     expect(html).toContain("Audio Tracks (0)");
+    expect(html).not.toContain("left:");
+  });
+});
+
+describe("AudioRack", () => {
+  const dummyFile: FileState = {
+    path: "/path/video.mp4",
+    name: "video.mp4",
+    size: 1024,
+    duration: 100,
+    audioTracks: 2,
+    audioTracksInfo: [
+      { index: 0, name: "Desktop Audio", enabled: true, volume: 1.0, muted: false },
+      { index: 1, name: "Mic / Aux", enabled: false, volume: 1.5, muted: true },
+    ],
+    trims: [],
+    speedRanges: [],
+    audio: "keep",
+    audioSource: "default",
+    normalize: false,
+    outputs: [],
+    status: "queued",
+    percent: 0,
+    error: null,
+  };
+
+  it("renders track sliders and mute toggles independently", () => {
+    const onTrackChange = vi.fn();
+    const html = renderToStaticMarkup(
+      <AudioRack file={dummyFile} onTrackChange={onTrackChange} />
+    );
+
+    expect(html).toContain("Audio Tracks (2)");
+    expect(html).toContain("Desktop Audio");
+    expect(html).toContain("Mic / Aux");
+    expect(html).toContain('type="range"');
+    expect(html).toContain("100%");
+    expect(html).toContain("150%");
+    expect(html).toContain("Mute");
+    expect(html).toContain("Muted");
+  });
+});
+
+describe("WaveformLanes", () => {
+  const dummyFile: FileState = {
+    path: "/path/video.mp4",
+    name: "video.mp4",
+    size: 1024,
+    duration: 100,
+    audioTracks: 2,
+    audioTracksInfo: [
+      { index: 0, name: "Desktop Audio", enabled: true, volume: 1.0, muted: false },
+      { index: 1, name: "Mic / Aux", enabled: false, volume: 1.5, muted: true },
+    ],
+    trims: [],
+    speedRanges: [],
+    audio: "keep",
+    audioSource: "default",
+    normalize: false,
+    outputs: [],
+    status: "queued",
+    percent: 0,
+    error: null,
+  };
+
+  it("renders SVG lanes and playhead indicator independently", () => {
+    const waveforms = new Map<number, Float32Array>([
+      [0, new Float32Array([0.1, 0.5, 0.8])],
+    ]);
+    const html = renderToStaticMarkup(
+      <WaveformLanes file={dummyFile} playhead={25} waveforms={waveforms} />
+    );
+
+    expect(html).toContain("<svg");
+    expect(html).toContain("Desktop Audio");
+    expect(html).toContain("Mic / Aux");
+    expect(html).toContain("left:25%");
+  });
+
+  it("omits playhead indicator when playhead is null", () => {
+    const html = renderToStaticMarkup(
+      <WaveformLanes file={dummyFile} playhead={null} />
+    );
     expect(html).not.toContain("left:");
   });
 });
