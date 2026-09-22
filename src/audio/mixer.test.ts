@@ -12,6 +12,7 @@ describe("AudioTrackMixer", () => {
       gain: {
         value: 1,
         setValueAtTime: vi.fn(),
+        setTargetAtTime: vi.fn(),
       },
       connect: vi.fn(),
       disconnect: vi.fn(),
@@ -134,10 +135,10 @@ describe("AudioTrackMixer", () => {
     await mixer.loadTrack(0, "blob:track-0");
 
     mixer.setTrackVolume(0, 0.8, false);
-    expect(mockGainNode.gain.setValueAtTime).toHaveBeenCalledWith(0.8, mockAudioContext.currentTime);
+    expect(mockGainNode.gain.setTargetAtTime).toHaveBeenCalledWith(0.8, mockAudioContext.currentTime, 0.015);
 
     mixer.setTrackVolume(0, 0.8, true);
-    expect(mockGainNode.gain.setValueAtTime).toHaveBeenCalledWith(0, mockAudioContext.currentTime);
+    expect(mockGainNode.gain.setTargetAtTime).toHaveBeenCalledWith(0, mockAudioContext.currentTime, 0.015);
 
     // Setting volume for non-existent track is safe
     expect(() => mixer.setTrackVolume(99, 0.5)).not.toThrow();

@@ -45,7 +45,11 @@ export class AudioTrackMixer {
     const g = this.gainNodes.get(index);
     if (!g || !this.ctx) return;
     const target = muted ? 0 : volume;
-    g.gain.setValueAtTime(target, this.ctx.currentTime);
+    if (typeof g.gain.setTargetAtTime === "function") {
+      g.gain.setTargetAtTime(target, this.ctx.currentTime, 0.015);
+    } else {
+      g.gain.setValueAtTime(target, this.ctx.currentTime);
+    }
   }
 
   play(fromTime = this.currentPlayhead): void {

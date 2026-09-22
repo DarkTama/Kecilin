@@ -292,6 +292,7 @@ struct BatchDone {
 }
 
 /// Count audio streams in ffmpeg's stderr header (`Stream #0:1...: Audio: …`).
+#[cfg(test)]
 pub(crate) fn parse_audio_tracks(stderr: &str) -> usize {
     stderr
         .lines()
@@ -358,7 +359,7 @@ pub(crate) fn parse_audio_tracks_info(stderr: &str) -> Vec<AudioTrackMeta> {
                 }
             }
         } else {
-            // Enable recognized primary sources (Desktop/Game and Mic/Aux) or Track 0 & 1
+            // Enable recognized primary sources (Desktop/Game and Mic/Aux) or default to Track 1
             for t in tracks.iter_mut() {
                 let l = t.name.to_lowercase();
                 if l.contains("desktop") || l.contains("game") || l.contains("mic") || l.contains("aux") {
@@ -457,7 +458,10 @@ pub(crate) struct AudioOpts<'a> {
 const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
 
 pub(crate) fn build_audio_filtergraph(tracks: &[AudioTrackMeta], normalize: bool) -> Option<String> {
-    let enabled: Vec<&AudioTrackMeta> = tracks.iter().filter(|t| t.enabled && t.volume > 0.001).collect();
+    let enabled: Vec<&AudioTrackMeta> = tracks
+        .iter()
+        .filter(|t| t.enabled && t.volume.is_finite() && t.volume > 0.001)
+        .collect();
     if enabled.is_empty() {
         return None;
     }
@@ -547,12 +551,12 @@ pub(crate) fn build_ffmpeg_args(
         .and_then(|t| build_audio_filtergraph(t, audio.normalize));
     let multi_track_all_disabled = audio
         .tracks_info
-        .map(|t| !t.is_empty() && t.iter().all(|x| !x.enabled || x.volume <= 0.001))
+        .map(|t| !t.is_empty() && t.iter().all(|x| !x.enabled || !x.volume.is_finite() || x.volume <= 0.001))
         .unwrap_or(false);
     let mute = audio.level == Some("mute") || multi_track_all_disabled;
     let tracks_premixed = audio
         .tracks_info
-        .map(|t| t.iter().any(|x| x.enabled && x.volume > 0.001))
+        .map(|t| t.iter().any(|x| x.enabled && x.volume.is_finite() && x.volume > 0.001))
         .unwrap_or(false);
 
     let mut a: Vec<String> = vec!["-y".into()];
@@ -738,7 +742,7 @@ pub(crate) fn build_speed_filtergraph(
     let ranges = normalize_speed_ranges(speed_ranges, t_start, t_end);
 
     let enabled: Vec<&AudioTrackMeta> = tracks_info
-        .map(|ts| ts.iter().filter(|t| t.enabled && t.volume > 0.001).collect())
+        .map(|ts| ts.iter().filter(|t| t.enabled && t.volume.is_finite() && t.volume > 0.001).collect())
         .unwrap_or_default();
 
     let fmt = |n: f64| -> String { format!("{:.3}", n) };
@@ -2463,6 +2467,15 @@ mod tests {
     fn multi_track_filtergraph_all_disabled_returns_none() {
         let tracks = vec![
             AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: false, volume: 1.0 },
+        ];
+        assert_eq!(build_audio_filtergraph(&tracks, false), None);
+    }
+
+    #[test]
+    fn multi_track_filtergraph_ignores_non_finite_volume() {
+        let tracks = vec![
+            AudioTrackMeta { index: 0, name: "Desktop".into(), enabled: true, volume: f32::NAN },
+            AudioTrackMeta { index: 1, name: "Mic".into(), enabled: true, volume: f32::INFINITY },
         ];
         assert_eq!(build_audio_filtergraph(&tracks, false), None);
     }
