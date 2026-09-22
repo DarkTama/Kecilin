@@ -259,7 +259,7 @@ export default function App() {
   return (
     <div className="flex min-h-screen flex-col">
       {helpOpen && <HelpPanel onClose={() => setHelpOpen(false)} />}
-      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 px-6 py-8">
+      <div className="mx-auto flex w-full max-w-3xl lg:max-w-5xl xl:max-w-6xl 2xl:max-w-7xl flex-1 flex-col gap-5 px-4 sm:px-6 py-6 transition-all duration-300">
         <header className="flex items-baseline justify-between">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">

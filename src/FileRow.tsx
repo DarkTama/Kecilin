@@ -313,7 +313,7 @@ function TrimEditor({
   const enabledTrackCount = file.audioTracksInfo
     ? file.audioTracksInfo.filter((t) => t.enabled).length
     : 1;
-  const [audioDrawerOpen, setAudioDrawerOpen] = useState(false);
+  const [audioDrawerOpen, setAudioDrawerOpen] = useState(() => isMultiTrack);
   const [theaterMode, setTheaterMode] = useState(false);
   const [previewRes, setPreviewRes] = useState<360 | 720 | 1080>(720);
   const [resMenuOpen, setResMenuOpen] = useState(false);
@@ -1167,21 +1167,34 @@ function TrimEditor({
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-stretch transition-all duration-300">
             <div
               className={`relative bg-black rounded-xl border border-slate-800 overflow-hidden flex flex-col justify-center items-center ${
-                theaterMode ? "md:col-span-12 h-[380px]" : "md:col-span-8 h-[280px]"
+                theaterMode
+                  ? "md:col-span-12 aspect-video max-h-[520px] w-full"
+                  : "md:col-span-8 aspect-video max-h-[420px] w-full"
               }`}
             >
               {videoElement}
               {liveRateOverlay}
               {previewControls}
             </div>
-            <div className={`${theaterMode ? "md:col-span-12" : "md:col-span-4 h-[280px]"}`}>
-              <AudioRack file={file} onTrackChange={handleTrackChange} className="h-full" />
+            <div
+              className={`${
+                theaterMode
+                  ? "md:col-span-12"
+                  : "md:col-span-4 flex flex-col min-h-[280px]"
+              }`}
+            >
+              <AudioRack
+                file={file}
+                onTrackChange={handleTrackChange}
+                horizontal={theaterMode}
+                className="h-full"
+              />
             </div>
           </div>
         ) : (
           <div
-            className={`relative bg-black rounded-xl border border-slate-800 overflow-hidden flex flex-col justify-center items-center ${
-              theaterMode ? "h-[380px]" : "h-[260px]"
+            className={`relative bg-black rounded-xl border border-slate-800 overflow-hidden flex flex-col justify-center items-center w-full aspect-video ${
+              theaterMode ? "max-h-[520px]" : "max-h-[380px]"
             }`}
           >
             {videoElement}

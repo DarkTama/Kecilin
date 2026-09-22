@@ -16,7 +16,7 @@
 </head>
 <body class="bg-slate-950 text-slate-100 p-4 md:p-8 flex flex-col items-center min-h-screen">
 
-  <div class="w-full max-w-5xl space-y-4">
+  <div class="w-full max-w-5xl xl:max-w-6xl 2xl:max-w-7xl space-y-4 transition-all duration-300">
     <!-- Top Header & Layout Switcher -->
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
       <div>
@@ -54,7 +54,7 @@
         <div id="opt1-top-grid" class="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-stretch transition-all duration-300">
           
           <!-- Video Monitor: Dynamically expands from 8 cols (67%) to full 12 cols -->
-          <div id="opt1-monitor" class="md:col-span-8 bg-black rounded-xl border border-slate-800 overflow-hidden relative flex flex-col justify-center items-center h-[280px] shadow-inner transition-all duration-300">
+          <div id="opt1-monitor" class="md:col-span-8 bg-black rounded-xl border border-slate-800 overflow-hidden relative flex flex-col justify-center items-center aspect-video max-h-[420px] shadow-inner transition-all duration-300">
             <div class="text-center select-none">
               <div class="text-4xl mb-1.5">🎬</div>
               <div class="text-xs font-medium text-slate-300">OBS_Recording_2026-09-22.mp4</div>
@@ -537,13 +537,15 @@
       const text = document.getElementById('theater-text');
 
       if (isTheater) {
-        monitor.className = "md:col-span-12 bg-black rounded-xl border border-slate-800 overflow-hidden relative flex flex-col justify-center items-center h-[380px] shadow-2xl transition-all duration-300";
+        monitor.className = "md:col-span-12 bg-black rounded-xl border border-slate-800 overflow-hidden relative flex flex-col justify-center items-center aspect-video max-h-[520px] shadow-2xl transition-all duration-300";
         rack.className = "md:col-span-12 bg-slate-950/90 rounded-xl border border-slate-800 p-3 flex flex-col justify-between h-auto space-y-2 transition-all duration-300";
+        document.querySelector('#opt1-rack .space-y-2').className = "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 overflow-y-auto max-h-[220px] p-0.5 custom-scroll";
         icon.innerText = "⛷️";
         text.innerText = "Standard";
       } else {
-        monitor.className = "md:col-span-8 bg-black rounded-xl border border-slate-800 overflow-hidden relative flex flex-col justify-center items-center h-[280px] shadow-inner transition-all duration-300";
-        rack.className = "md:col-span-4 bg-slate-950/90 rounded-xl border border-slate-800 p-3 flex flex-col justify-between h-[280px] transition-all duration-300";
+        monitor.className = "md:col-span-8 bg-black rounded-xl border border-slate-800 overflow-hidden relative flex flex-col justify-center items-center aspect-video max-h-[420px] shadow-inner transition-all duration-300";
+        rack.className = "md:col-span-4 bg-slate-950/90 rounded-xl border border-slate-800 p-3 flex flex-col justify-between min-h-[280px] transition-all duration-300";
+        document.querySelector('#opt1-rack .grid').className = "space-y-2 overflow-y-auto pr-1 custom-scroll py-1 flex-1 max-h-[340px]";
         icon.innerText = "⛶";
         text.innerText = "Theater";
       }

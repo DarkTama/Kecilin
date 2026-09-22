@@ -93,10 +93,12 @@ export function useAudioWaveforms(
 export function AudioRack({
   file,
   onTrackChange,
+  horizontal = false,
   className,
 }: {
   file: FileState;
   onTrackChange: (index: number, patch: Partial<TrackInfo>) => void;
+  horizontal?: boolean;
   className?: string;
 }) {
   const t = useT();
@@ -110,7 +112,13 @@ export function AudioRack({
         </span>
       </div>
 
-      <div className="space-y-2.5 overflow-y-auto flex-1 max-h-[220px] pr-1 custom-scroll">
+      <div
+        className={
+          horizontal
+            ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 overflow-y-auto max-h-[220px] p-0.5 custom-scroll"
+            : "space-y-2.5 overflow-y-auto flex-1 max-h-[360px] pr-1 custom-scroll"
+        }
+      >
         {tracks.map((track) => {
           const volPct = Math.round(track.volume * 100);
           const isBoosted = volPct > 100;
