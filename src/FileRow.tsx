@@ -1162,46 +1162,6 @@ function TrimEditor({
 
   return (
     <div className="flex flex-col gap-3 border-t border-slate-800 px-4 py-4">
-      {showVideo &&
-        (isMultiTrack && audioDrawerOpen ? (
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-stretch transition-all duration-300">
-            <div
-              className={`relative bg-black rounded-xl border border-slate-800 overflow-hidden flex flex-col justify-center items-center ${
-                theaterMode
-                  ? "md:col-span-12 aspect-video max-h-[520px] w-full"
-                  : "md:col-span-8 aspect-video max-h-[420px] w-full"
-              }`}
-            >
-              {videoElement}
-              {liveRateOverlay}
-              {previewControls}
-            </div>
-            <div
-              className={`${
-                theaterMode
-                  ? "md:col-span-12"
-                  : "md:col-span-4 flex flex-col min-h-[280px]"
-              }`}
-            >
-              <AudioRack
-                file={file}
-                onTrackChange={handleTrackChange}
-                horizontal={theaterMode}
-                className="h-full"
-              />
-            </div>
-          </div>
-        ) : (
-          <div
-            className={`relative bg-black rounded-xl border border-slate-800 overflow-hidden flex flex-col justify-center items-center w-full aspect-video ${
-              theaterMode ? "max-h-[520px]" : "max-h-[380px]"
-            }`}
-          >
-            {videoElement}
-            {liveRateOverlay}
-            {previewControls}
-          </div>
-        ))}
       {preview === "preparing" && (
         <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
           <div className="flex items-center justify-between gap-2">
@@ -1231,515 +1191,586 @@ function TrimEditor({
       )}
       {preview === "none" && <p className="text-xs text-slate-400">{t("noPreview")}</p>}
 
-      {/* Part length and Auto-Split toolbar */}
-      {duration != null && duration > 0 && (
-        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-          <span>{t("partLength")}</span>
-          {(
-            [
-              ["free", t("free")],
-              ["30", t("status30")],
-              ["custom", t("customLen")],
-            ] as const
-          ).map(([mode, label]) => (
-            <button
-              key={mode}
-              onClick={() => {
-                setLenMode(mode);
-                const L =
-                  mode === "30"
-                    ? 30
-                    : mode === "custom"
-                      ? customSecs >= 1
-                        ? customSecs
-                        : lastCustomLen || 15
-                      : null;
-                if (L != null && L >= 1) {
-                  if (mode === "custom") {
-                    setLastCustomLen(L);
-                  }
-                  slideTo(start, L);
-                }
-              }}
-              className={`rounded-full border px-2.5 py-1 ${
-                lenMode === mode
-                  ? "border-emerald-500 bg-emerald-500/10 text-emerald-300"
-                  : "border-slate-700 hover:bg-slate-800"
+      {/* Main Studio Grid: Left (Player, Timeline, Waves, Transport) + Right (Inspector: Audio, Tools, Actions) */}
+      <div className={theaterMode ? "flex flex-col gap-3.5" : "grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-start"}>
+        {/* LEFT COLUMN: Media & Timeline (8 cols or full-width in theater mode) */}
+        <div className={theaterMode ? "w-full flex flex-col gap-3" : "lg:col-span-8 flex flex-col gap-3 min-w-0"}>
+          {showVideo && (
+            <div
+              className={`relative bg-black rounded-xl border border-slate-800 overflow-hidden flex flex-col justify-center items-center w-full aspect-video ${
+                theaterMode ? "max-h-[480px]" : "max-h-[310px]"
               }`}
             >
-              {label}
-            </button>
-          ))}
-          {lenMode === "custom" && (
-            <label className="flex items-center gap-1">
-              <input
-                value={customLen}
-                onChange={(e) => setCustomLen(e.target.value)}
-                onBlur={(e) => commitCustomLen(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && commitCustomLen(customLen)}
-                className="w-14 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
-              />
-              s
-            </label>
+              {videoElement}
+              {liveRateOverlay}
+              {previewControls}
+            </div>
           )}
-          <button
-            type="button"
-            onClick={autoSplit}
-            className="rounded-full border border-amber-500/50 bg-amber-500/10 px-2.5 py-1 text-amber-300 hover:bg-amber-500/20 hover:border-amber-400 font-medium transition-colors"
-          >
-            {t("autoSplitBtn", { len: lenMode === "30" ? "30s" : `${customLen}s` })}
-          </button>
-          {fixedLen != null && <span className="text-slate-500">{t("slideHint")}</span>}
-        </div>
-      )}
 
-      {/* Multi-part cuts chip list with inline filename editing */}
-      {ranges.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          {ranges.map((r, i) => (
-            <span
-              key={`${r.start}-${r.end}-${i}`}
-              className="flex items-center gap-1.5 rounded-full border border-emerald-700 bg-emerald-500/10 px-2.5 py-1 tabular-nums text-emerald-300"
-            >
-              <span>{t("partChip", { n: i + 1 })}</span>
-              <input
-                type="text"
-                value={r.customName ?? ""}
-                placeholder={outputName(file.path, preset, i + 1, namingPattern, undefined, resolvePreset(preset, customPresets).height)}
-                title={t("outputFilenamePlaceholder")}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  const updated = ranges.map((p, pi) =>
-                    pi === i ? { ...p, customName: val || undefined } : p,
-                  );
-                  setRanges(updated);
-                  setTrimCustomName(index, i, val);
-                  if (i === 0) {
-                    setSingleCustomName(val);
-                  }
-                }}
-                className="w-28 rounded border border-emerald-700/60 bg-slate-950/80 px-1.5 py-0.5 text-xs text-emerald-200 placeholder:text-emerald-700/50 focus:border-emerald-400 focus:outline-none font-mono"
-              />
-              <span>{fmtTime(r.start)}–{fmtTime(r.end)}</span>
-              <button
-                onClick={() => {
-                  const next = ranges.filter((_, j) => j !== i);
-                  setRanges(next);
-                  if (next.length === 0) {
-                    setSingleCustomName("");
-                  }
-                }}
-                className="text-emerald-400 hover:text-white ml-0.5"
-                title={t("removePart")}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Precision Timeline Scrubber */}
-      {duration != null && duration > 0 && (
-        <RangeSlider
-          duration={duration}
-          start={start}
-          end={end}
-          playhead={showVideo ? playhead : null}
-          speedRampEnabled={speedRampEnabled}
-          speedRanges={speedDrafts.map((d) => ({
-            start: d.start,
-            end: d.end,
-            speed: d.multiplier,
-          }))}
-          activeSpeedIdx={activeSpeedIdx}
-          onChange={handleRange}
-          onSpeedChange={handleSpeedRange}
-          onSelectSpeed={setActiveSpeedIdx}
-          onSeek={(tt) => {
-            const v = videoRef.current;
-            if (v && showVideo) {
-              v.currentTime = tt;
-              setPlayhead(tt);
-            }
-            if (isMultiTrack) {
-              mixerRef.current?.seek(tt);
-            }
-          }}
-          labels={[t("trimStart"), t("trimEnd")]}
-          speedLabels={[t("speedStart"), t("speedEnd")]}
-        />
-      )}
-
-      {/* Waveform lanes for the multi-track mixer, beneath the timeline */}
-      {isMultiTrack && audioDrawerOpen && (
-        <WaveformLanes file={file} playhead={showVideo ? playhead : null} className="mt-1" />
-      )}
-
-      {/* Output preview strip: the rendered result drawn to scale. */}
-      {speedRampEnabled && outputSegments.length > 0 && (
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center justify-between text-[11px] text-slate-400">
-            <span>{t("outputPreview")}</span>
-            <span className="font-mono">
-              {t("outputDuration", { out: fmtTime(effDur) })}
-              {savedSecs > 0.05 && origDur > 0 && (
-                <span className="ml-1.5 text-emerald-400">
-                  −{Math.round((savedSecs / origDur) * 100)}%
-                </span>
-              )}
-            </span>
-          </div>
-          <div className="flex h-2 w-full overflow-hidden rounded-full bg-slate-900">
-            {outputSegments.map((seg, i) => (
-              <div
-                key={i}
-                title={`${seg.kind === "sped" ? "⚡" : "1×"} · ${fmtTime(seg.outputDuration)}`}
-                // minWidth keeps a very short segment from rendering sub-pixel
-                // and disappearing; flexShrink lets the row still fit exactly.
-                style={{ width: `${seg.fraction * 100}%`, minWidth: "3px" }}
-                className={
-                  seg.kind === "sped"
-                    ? "h-full shrink-0 border-r border-slate-950 bg-amber-500 last:border-r-0"
-                    : "h-full shrink-0 border-r border-slate-950 bg-slate-600 last:border-r-0"
+          {/* Precision Timeline Scrubber */}
+          {duration != null && duration > 0 && (
+            <RangeSlider
+              duration={duration}
+              start={start}
+              end={end}
+              playhead={showVideo ? playhead : null}
+              speedRampEnabled={speedRampEnabled}
+              speedRanges={speedDrafts.map((d) => ({
+                start: d.start,
+                end: d.end,
+                speed: d.multiplier,
+              }))}
+              activeSpeedIdx={activeSpeedIdx}
+              onChange={handleRange}
+              onSpeedChange={handleSpeedRange}
+              onSelectSpeed={setActiveSpeedIdx}
+              onSeek={(tt) => {
+                const v = videoRef.current;
+                if (v && showVideo) {
+                  v.currentTime = tt;
+                  setPlayhead(tt);
                 }
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Speed Ramp (Fast Forward) Control Deck */}
-      <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 flex flex-col gap-2.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <label className="flex items-center gap-2 cursor-pointer select-none font-medium text-xs text-amber-400">
-            <input
-              type="checkbox"
-              checked={speedRampEnabled}
-              onChange={(e) => {
-                const checked = e.target.checked;
-                setSpeedRampEnabled(checked);
-                // Turning it on with no ranges yet seeds one over the whole trim.
-                if (checked && speedDrafts.length === 0) {
-                  const eVal = end > start ? end : (duration ?? 0);
-                  setSpeedDrafts([makeDraft(start, eVal)]);
-                  setActiveSpeedIdx(0);
+                if (isMultiTrack) {
+                  mixerRef.current?.seek(tt);
                 }
               }}
-              className="accent-amber-500 rounded"
+              labels={[t("trimStart"), t("trimEnd")]}
+              speedLabels={[t("speedStart"), t("speedEnd")]}
             />
-            <span>⚡ {t("speedRamp")}</span>
-          </label>
-
-          {speedRampEnabled && (
-            <span className="text-xs text-slate-400 font-mono">
-              {t("effectiveDurationLabel", {
-                orig: fmtTime(origDur),
-                out: fmtTime(effDur),
-                saved: t("timeSaved", { t: fmtTime(savedSecs) }),
-              })}
-            </span>
           )}
-        </div>
 
-        {speedRampEnabled && (
-          <div className="flex flex-col gap-2 pt-1 border-t border-slate-800/80">
-            {speedDrafts.map((d, idx) => (
-              <div
-                key={d.id}
-                onPointerDown={() => setActiveSpeedIdx(idx)}
-                className={`flex flex-wrap items-center gap-3 rounded-md border p-2 text-xs text-slate-300 transition-colors ${
-                  idx === activeSpeedIdx
-                    ? "border-amber-500/60 bg-amber-500/5"
-                    : "border-slate-800 hover:border-slate-700"
-                }`}
-              >
-                <span className="font-semibold text-amber-400">⚡{idx + 1}</span>
+          {/* Waveform lanes for multi-track audio, directly beneath timeline scrubber */}
+          {isMultiTrack && audioDrawerOpen && (
+            <WaveformLanes file={file} playhead={showVideo ? playhead : null} className="mt-0.5" />
+          )}
 
-                <label className="flex items-center gap-1.5">
-                  <span>{t("from")}</span>
-                  <input
-                    value={d.startText}
-                    onChange={(e) =>
-                      patchDraft(idx, (cur) => ({ ...cur, startText: e.target.value }))
+          {/* Output preview strip: rendered result drawn to scale */}
+          {speedRampEnabled && outputSegments.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <span>{t("outputPreview")}</span>
+                <span className="font-mono">
+                  {t("outputDuration", { out: fmtTime(effDur) })}
+                  {savedSecs > 0.05 && origDur > 0 && (
+                    <span className="ml-1.5 text-emerald-400">
+                      −{Math.round((savedSecs / origDur) * 100)}%
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div className="flex h-2 w-full overflow-hidden rounded-full bg-slate-900">
+                {outputSegments.map((seg, i) => (
+                  <div
+                    key={i}
+                    title={`${seg.kind === "sped" ? "⚡" : "1×"} · ${fmtTime(seg.outputDuration)}`}
+                    style={{ width: `${seg.fraction * 100}%`, minWidth: "3px" }}
+                    className={
+                      seg.kind === "sped"
+                        ? "h-full shrink-0 border-r border-slate-950 bg-amber-500 last:border-r-0"
+                        : "h-full shrink-0 border-r border-slate-950 bg-slate-600 last:border-r-0"
                     }
-                    onBlur={(e) => commitSpeedText(idx, "start", e.target.value)}
-                    onKeyDown={(e) =>
-                      e.key === "Enter" && commitSpeedText(idx, "start", d.startText)
-                    }
-                    className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
                   />
-                </label>
+                ))}
+              </div>
+            </div>
+          )}
 
-                <label className="flex items-center gap-1.5">
-                  <span>{t("to")}</span>
-                  <input
-                    value={d.endText}
-                    onChange={(e) => patchDraft(idx, (cur) => ({ ...cur, endText: e.target.value }))}
-                    onBlur={(e) => commitSpeedText(idx, "end", e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && commitSpeedText(idx, "end", d.endText)}
-                    className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
-                  />
-                </label>
-
-                <div className="flex items-center gap-1 bg-slate-900 rounded-md p-0.5 border border-slate-800">
+          {/* Transport & Range Controls Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5 pt-1 text-xs">
+            <div className="flex items-center gap-1.5">
+              {showVideo && (
+                <>
                   <button
-                    type="button"
-                    onClick={() => patchDraft(idx, (cur) => syncDraft({ ...cur, mode: "fixed" }))}
-                    className={`px-2 py-1 rounded text-xs transition-colors ${
-                      d.mode === "fixed"
-                        ? "bg-amber-500 text-slate-950 font-semibold shadow"
-                        : "text-slate-400 hover:text-white"
-                    }`}
+                    onClick={togglePlay}
+                    title={t("playTitle")}
+                    className="w-24 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 hover:bg-slate-800 text-xs font-medium text-slate-200 transition-colors"
                   >
-                    {t("speedMultiplier")}
+                    {playing ? t("pause") : t("playRange")}
                   </button>
                   <button
                     type="button"
-                    onClick={() => patchDraft(idx, (cur) => syncDraft({ ...cur, mode: "target" }))}
-                    className={`px-2 py-1 rounded text-xs transition-colors ${
-                      d.mode === "target"
-                        ? "bg-amber-500 text-slate-950 font-semibold shadow"
-                        : "text-slate-400 hover:text-white"
-                    }`}
+                    onClick={() => stepFrame(-1)}
+                    title="-1 frame (~0.033s)"
+                    className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-800 font-mono transition-colors"
                   >
-                    {t("fitTargetDuration")}
+                    {t("frameStepBack")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => stepFrame(1)}
+                    title="+1 frame (~0.033s)"
+                    className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-800 font-mono transition-colors"
+                  >
+                    {t("frameStepFwd")}
+                  </button>
+                  {playhead != null && (
+                    <span className="tabular-nums text-xs text-slate-400 font-mono ml-1">
+                      {t("at", { t: fmtTime(playhead) })}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1 text-slate-300 text-xs font-mono">
+                <span className="text-slate-500">{t("from")}</span>
+                <input
+                  value={startText}
+                  onChange={(e) => setStartText(e.target.value)}
+                  onBlur={(e) => commitText("start", e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && commitText("start", startText)}
+                  className="w-18 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-slate-200 tabular-nums font-mono"
+                />
+              </label>
+              <label className="flex items-center gap-1 text-slate-300 text-xs font-mono">
+                <span className="text-slate-500">{t("to")}</span>
+                <input
+                  value={endText}
+                  onChange={(e) => setEndText(e.target.value)}
+                  onBlur={(e) => commitText("end", e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && commitText("end", endText)}
+                  className="w-18 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-slate-200 tabular-nums font-mono"
+                />
+              </label>
+              <span className="text-xs text-slate-500 font-mono">
+                {valid ? `(${fmtTime(end - start)})` : t("endAfterStart")}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* RIGHT COLUMN: Studio Inspector (Audio, Trims, Speed, Pinned Actions) */}
+        <div
+          className={
+            theaterMode
+              ? "w-full flex flex-col gap-3 bg-slate-950/70 rounded-xl border border-slate-800 p-3.5"
+              : "lg:col-span-4 flex flex-col justify-between gap-3 bg-slate-950/70 rounded-xl border border-slate-800 p-3.5 min-w-0 self-stretch"
+          }
+        >
+          <div className="flex flex-col gap-3">
+            {/* Multi-track Audio Rack or Single-track Audio Controls */}
+            {isMultiTrack ? (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                    🎚️ {t("audioTracks")} ({t("tracksSelected", { n: enabledTrackCount })})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAudioDrawerOpen((o) => !o)}
+                    className="text-[11px] text-emerald-400 hover:text-emerald-300 font-mono"
+                  >
+                    {audioDrawerOpen ? "▲ Hide" : "▼ Show"}
                   </button>
                 </div>
-
-                {d.mode === "fixed" && (
-                  <div className="flex items-center gap-1.5">
-                    {[1.5, 2, 4, 8].map((mult) => (
-                      <button
-                        key={mult}
-                        type="button"
-                        onClick={() => {
-                          patchDraft(idx, (cur) => ({ ...cur, customMult: "" }));
-                          setMultiplierAndSyncTarget(idx, mult);
-                        }}
-                        className={`px-2 py-1 rounded border text-xs tabular-nums font-medium ${
-                          d.multiplier === mult && !d.customMult
-                            ? "border-amber-500 bg-amber-500/20 text-amber-300"
-                            : "border-slate-700 hover:bg-slate-800 text-slate-300"
-                        }`}
-                      >
-                        {mult}x
-                      </button>
-                    ))}
-                    <label className="flex items-center gap-1 text-slate-400">
-                      <input
-                        type="text"
-                        placeholder="custom"
-                        value={d.customMult}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          patchDraft(idx, (cur) => ({ ...cur, customMult: val }));
-                          const num = parseFloat(val);
-                          if (Number.isFinite(num) && num >= 1) {
-                            setMultiplierAndSyncTarget(idx, num);
-                          }
-                        }}
-                        className="w-16 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-xs tabular-nums font-mono text-slate-200"
-                      />
-                      <span>x</span>
-                    </label>
-                  </div>
+                {audioDrawerOpen && (
+                  <AudioRack
+                    file={file}
+                    onTrackChange={handleTrackChange}
+                    horizontal={theaterMode}
+                    className="border-none bg-transparent p-0 shadow-none space-y-2"
+                  />
                 )}
-
-                {d.mode === "target" && (
-                  <div className="flex items-center gap-1.5">
-                    {[15, 30, 60].map((tSecs) => (
-                      <button
-                        key={tSecs}
-                        type="button"
-                        onClick={() => setTargetAndSyncMultiplier(idx, String(tSecs))}
-                        className={`px-2 py-1 rounded border text-xs tabular-nums font-medium ${
-                          parseFloat(d.targetText) === tSecs
-                            ? "border-amber-500 bg-amber-500/20 text-amber-300"
-                            : "border-slate-700 hover:bg-slate-800 text-slate-300"
-                        }`}
-                      >
-                        {tSecs}s
-                      </button>
-                    ))}
-                    <label className="flex items-center gap-1.5 text-slate-400">
-                      <span>{t("targetDurationLabel")}:</span>
-                      <input
-                        type="text"
-                        value={d.targetText}
-                        onChange={(e) => setTargetAndSyncMultiplier(idx, e.target.value)}
-                        className="w-16 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-center text-xs tabular-nums font-mono text-slate-200"
-                      />
-                      <span>s</span>
-                    </label>
-                    <span className="text-amber-400 font-mono font-medium">→ {d.multiplier}x</span>
-                  </div>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => removeSpeedRange(idx)}
-                  title={t("removeFastForward")}
-                  className="ml-auto rounded border border-slate-700 px-2 py-1 text-slate-400 hover:border-red-500/60 hover:text-red-300"
-                >
-                  ✕
-                </button>
               </div>
-            ))}
+            ) : (
+              <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg border border-slate-800 bg-slate-900/60 text-xs">
+                <label className="flex items-center gap-2 font-mono text-[11px] text-slate-300">
+                  <span className="text-slate-400">Vol:</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="200"
+                    value={singleTrackVol}
+                    onChange={(e) => handleSingleTrackVol(Number(e.target.value))}
+                    className="w-24 h-1 bg-slate-800 rounded accent-emerald-500 cursor-pointer"
+                  />
+                  <span
+                    className={`w-9 text-right ${
+                      singleTrackVol > 100 ? "text-amber-400 font-bold" : "text-emerald-400"
+                    }`}
+                  >
+                    {singleTrackVol}%
+                  </span>
+                </label>
+                <label
+                  className="flex items-center gap-1.5 text-slate-300 text-xs cursor-pointer select-none"
+                  title={t("normalizeTitle")}
+                >
+                  <input
+                    type="checkbox"
+                    checked={file.normalize}
+                    onChange={(e) => setNormalize(file.path, e.target.checked)}
+                    className="accent-emerald-500 rounded"
+                  />
+                  <span>{t("normalize")}</span>
+                </label>
+              </div>
+            )}
 
-            <button
-              type="button"
-              onClick={addSpeedRange}
-              className="self-start rounded-lg border border-dashed border-amber-500/50 px-3 py-1.5 text-xs font-medium text-amber-400 hover:border-amber-400 hover:bg-amber-500/10"
-            >
-              + {t("addFastForward")}
-            </button>
+            {/* Part length & Auto-Split Toolbar */}
+            {duration != null && duration > 0 && (
+              <div className="p-2.5 rounded-lg border border-slate-800/90 bg-slate-900/40 flex flex-col gap-2">
+                <div className="flex items-center justify-between text-xs text-slate-400">
+                  <span className="font-semibold text-slate-300">{t("partLength")}</span>
+                  {fixedLen != null && <span className="text-[10px] text-slate-500">{t("slideHint")}</span>}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  {(
+                    [
+                      ["free", t("free")],
+                      ["30", t("status30")],
+                      ["custom", t("customLen")],
+                    ] as const
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      onClick={() => {
+                        setLenMode(mode);
+                        const L =
+                          mode === "30"
+                            ? 30
+                            : mode === "custom"
+                              ? customSecs >= 1
+                                ? customSecs
+                                : lastCustomLen || 15
+                              : null;
+                        if (L != null && L >= 1) {
+                          if (mode === "custom") {
+                            setLastCustomLen(L);
+                          }
+                          slideTo(start, L);
+                        }
+                      }}
+                      className={`rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                        lenMode === mode
+                          ? "border-emerald-500 bg-emerald-500/15 text-emerald-300"
+                          : "border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                  {lenMode === "custom" && (
+                    <label className="flex items-center gap-1 text-[11px] text-slate-400">
+                      <input
+                        value={customLen}
+                        onChange={(e) => setCustomLen(e.target.value)}
+                        onBlur={(e) => commitCustomLen(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && commitCustomLen(customLen)}
+                        className="w-12 rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-center tabular-nums font-mono text-slate-200"
+                      />
+                      s
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    onClick={autoSplit}
+                    className="rounded-md border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-amber-300 hover:bg-amber-500/20 text-[11px] font-medium ml-auto transition-colors"
+                  >
+                    {t("autoSplitBtn", { len: lenMode === "30" ? "30s" : `${customLen}s` })}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Multi-part cuts chip list */}
+            {ranges.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 text-xs max-h-24 overflow-y-auto pr-1 custom-scroll">
+                {ranges.map((r, i) => (
+                  <span
+                    key={`${r.start}-${r.end}-${i}`}
+                    className="flex items-center gap-1 rounded-full border border-emerald-700/80 bg-emerald-950/40 px-2 py-0.5 text-[11px] tabular-nums text-emerald-300"
+                  >
+                    <span>{t("partChip", { n: i + 1 })}</span>
+                    <input
+                      type="text"
+                      value={r.customName ?? ""}
+                      placeholder={outputName(
+                        file.path,
+                        preset,
+                        i + 1,
+                        namingPattern,
+                        undefined,
+                        resolvePreset(preset, customPresets).height,
+                      )}
+                      title={t("outputFilenamePlaceholder")}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        const updated = ranges.map((p, pi) =>
+                          pi === i ? { ...p, customName: val || undefined } : p,
+                        );
+                        setRanges(updated);
+                        setTrimCustomName(index, i, val);
+                        if (i === 0) {
+                          setSingleCustomName(val);
+                        }
+                      }}
+                      className="w-20 rounded border border-emerald-700/60 bg-slate-950/80 px-1 py-0 text-[11px] text-emerald-200 placeholder:text-emerald-700/50 focus:border-emerald-400 focus:outline-none font-mono"
+                    />
+                    <span>
+                      {fmtTime(r.start)}–{fmtTime(r.end)}
+                    </span>
+                    <button
+                      onClick={() => {
+                        const next = ranges.filter((_, j) => j !== i);
+                        setRanges(next);
+                        if (next.length === 0) {
+                          setSingleCustomName("");
+                        }
+                      }}
+                      className="text-emerald-400 hover:text-white"
+                      title={t("removePart")}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Direct custom name editor if single part */}
+            {ranges.length === 0 && (
+              <label
+                className="flex items-center gap-1.5 text-xs text-slate-300 p-1.5 rounded-lg border border-slate-800 bg-slate-900/30"
+                title={t("outputFilenamePlaceholder")}
+              >
+                <span className="text-slate-400 font-mono text-[11px]">📁</span>
+                <input
+                  type="text"
+                  value={singleCustomName}
+                  placeholder={outputName(
+                    file.path,
+                    preset,
+                    null,
+                    namingPattern,
+                    undefined,
+                    resolvePreset(preset, customPresets).height,
+                  )}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSingleCustomName(val);
+                    setTrimCustomName(index, 0, val);
+                  }}
+                  className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none font-mono"
+                />
+              </label>
+            )}
+
+            {/* Speed Ramp (Fast Forward) Control Deck */}
+            <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-2.5 flex flex-col gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                <label className="flex items-center gap-2 cursor-pointer select-none font-medium text-xs text-amber-400">
+                  <input
+                    type="checkbox"
+                    checked={speedRampEnabled}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setSpeedRampEnabled(checked);
+                      if (checked && speedDrafts.length === 0) {
+                        const eVal = end > start ? end : (duration ?? 0);
+                        setSpeedDrafts([makeDraft(start, eVal)]);
+                        setActiveSpeedIdx(0);
+                      }
+                    }}
+                    className="accent-amber-500 rounded"
+                  />
+                  <span>⚡ {t("speedRamp")}</span>
+                </label>
+
+                {speedRampEnabled && (
+                  <span className="text-[10px] text-slate-400 font-mono">
+                    {t("timeSaved", { t: fmtTime(savedSecs) })}
+                  </span>
+                )}
+              </div>
+
+              {speedRampEnabled && (
+                <div className="flex flex-col gap-2 pt-1 border-t border-slate-800/80 max-h-48 overflow-y-auto pr-1 custom-scroll">
+                  {speedDrafts.map((d, idx) => (
+                    <div
+                      key={d.id}
+                      onPointerDown={() => setActiveSpeedIdx(idx)}
+                      className={`flex flex-col gap-1.5 rounded-md border p-2 text-xs text-slate-300 transition-colors ${
+                        idx === activeSpeedIdx
+                          ? "border-amber-500/60 bg-amber-500/5"
+                          : "border-slate-800 hover:border-slate-700"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-amber-400">⚡ Range {idx + 1}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeSpeedRange(idx)}
+                          title={t("removeFastForward")}
+                          className="rounded border border-slate-700 px-1.5 text-slate-400 hover:border-red-500/60 hover:text-red-300"
+                        >
+                          ✕
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <label className="flex items-center gap-1 text-[11px] text-slate-400 font-mono">
+                          <span>{t("from")}</span>
+                          <input
+                            value={d.startText}
+                            onChange={(e) =>
+                              patchDraft(idx, (cur) => ({ ...cur, startText: e.target.value }))
+                            }
+                            onBlur={(e) => commitSpeedText(idx, "start", e.target.value)}
+                            onKeyDown={(e) =>
+                              e.key === "Enter" && commitSpeedText(idx, "start", d.startText)
+                            }
+                            className="w-16 rounded border border-slate-700 bg-slate-950 px-1 py-0.5 text-center tabular-nums font-mono text-slate-200"
+                          />
+                        </label>
+                        <label className="flex items-center gap-1 text-[11px] text-slate-400 font-mono">
+                          <span>{t("to")}</span>
+                          <input
+                            value={d.endText}
+                            onChange={(e) =>
+                              patchDraft(idx, (cur) => ({ ...cur, endText: e.target.value }))
+                            }
+                            onBlur={(e) => commitSpeedText(idx, "end", e.target.value)}
+                            onKeyDown={(e) =>
+                              e.key === "Enter" && commitSpeedText(idx, "end", d.endText)
+                            }
+                            className="w-16 rounded border border-slate-700 bg-slate-950 px-1 py-0.5 text-center tabular-nums font-mono text-slate-200"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="flex items-center gap-1 bg-slate-900 rounded p-0.5 border border-slate-800 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => patchDraft(idx, (cur) => syncDraft({ ...cur, mode: "fixed" }))}
+                          className={`flex-1 py-0.5 rounded transition-colors ${
+                            d.mode === "fixed"
+                              ? "bg-amber-500 text-slate-950 font-semibold shadow"
+                              : "text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          {t("speedMultiplier")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => patchDraft(idx, (cur) => syncDraft({ ...cur, mode: "target" }))}
+                          className={`flex-1 py-0.5 rounded transition-colors ${
+                            d.mode === "target"
+                              ? "bg-amber-500 text-slate-950 font-semibold shadow"
+                              : "text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          {t("fitTargetDuration")}
+                        </button>
+                      </div>
+
+                      {d.mode === "fixed" && (
+                        <div className="flex items-center gap-1">
+                          {[2, 4, 8, 16].map((mult) => (
+                            <button
+                              key={mult}
+                              type="button"
+                              onClick={() => {
+                                patchDraft(idx, (cur) => ({ ...cur, customMult: "" }));
+                                setMultiplierAndSyncTarget(idx, mult);
+                              }}
+                              className={`px-1.5 py-0.5 rounded border text-[10px] tabular-nums font-medium ${
+                                d.multiplier === mult && !d.customMult
+                                  ? "border-amber-500 bg-amber-500/20 text-amber-300"
+                                  : "border-slate-700 hover:bg-slate-800 text-slate-300"
+                              }`}
+                            >
+                              {mult}x
+                            </button>
+                          ))}
+                          <input
+                            type="text"
+                            placeholder="custom"
+                            value={d.customMult}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              patchDraft(idx, (cur) => ({ ...cur, customMult: val }));
+                              const num = parseFloat(val);
+                              if (Number.isFinite(num) && num >= 1) {
+                                setMultiplierAndSyncTarget(idx, num);
+                              }
+                            }}
+                            className="w-14 rounded border border-slate-700 bg-slate-950 px-1 py-0.5 text-center text-[10px] tabular-nums font-mono text-slate-200 ml-auto"
+                          />
+                        </div>
+                      )}
+
+                      {d.mode === "target" && (
+                        <div className="flex items-center gap-1.5 text-xs">
+                          {[15, 30, 60].map((tSecs) => (
+                            <button
+                              key={tSecs}
+                              type="button"
+                              onClick={() => setTargetAndSyncMultiplier(idx, String(tSecs))}
+                              className={`px-1.5 py-0.5 rounded border text-[10px] tabular-nums font-medium ${
+                                parseFloat(d.targetText) === tSecs
+                                  ? "border-amber-500 bg-amber-500/20 text-amber-300"
+                                  : "border-slate-700 hover:bg-slate-800 text-slate-300"
+                              }`}
+                            >
+                              {tSecs}s
+                            </button>
+                          ))}
+                          <span className="text-amber-400 font-mono text-[11px] font-medium ml-auto">
+                            → {d.multiplier}x
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  <button
+                    type="button"
+                    onClick={addSpeedRange}
+                    className="rounded border border-dashed border-amber-500/50 px-2 py-1 text-[11px] font-medium text-amber-400 hover:border-amber-400 hover:bg-amber-500/10 text-center transition-colors"
+                  >
+                    + {t("addFastForward")}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        )}
-      </div>
 
-      {/* Main playback and single trim controls */}
-      <div className="flex flex-wrap items-center gap-3 text-sm">
-        {showVideo && (
-          <div className="flex items-center gap-1.5">
+          {/* Pinned Action Buttons */}
+          <div className="pt-2.5 border-t border-slate-800 flex items-center justify-between gap-2">
             <button
-              onClick={togglePlay}
-              title={t("playTitle")}
-              className="w-28 rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800 text-xs font-medium"
+              disabled={!valid}
+              onClick={addPart}
+              title={t("addPartTitle")}
+              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 hover:bg-slate-800 disabled:opacity-40 text-xs font-medium text-slate-300 transition-colors"
             >
-              {playing ? t("pause") : t("playRange")}
+              + {t("addPart")}
             </button>
-            <button
-              type="button"
-              onClick={() => stepFrame(-1)}
-              title="-1 frame (~0.033s)"
-              className="rounded-lg border border-slate-700 px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-800 font-mono"
-            >
-              {t("frameStepBack")}
-            </button>
-            <button
-              type="button"
-              onClick={() => stepFrame(1)}
-              title="+1 frame (~0.033s)"
-              className="rounded-lg border border-slate-700 px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-800 font-mono"
-            >
-              {t("frameStepFwd")}
-            </button>
+            <div className="flex items-center gap-2">
+              {(ranges.length > 0 || file.trims.length > 0 || file.speedRanges.length > 0) && (
+                <button
+                  onClick={clearAll}
+                  className="rounded-lg border border-slate-700 px-2.5 py-1.5 hover:bg-slate-800 text-xs font-medium text-slate-400 transition-colors"
+                >
+                  {t("clear")}
+                </button>
+              )}
+              <button
+                onClick={handleClose}
+                className="rounded-lg border border-slate-700 px-2.5 py-1.5 hover:bg-slate-800 text-xs font-medium text-slate-400 transition-colors"
+              >
+                {t("cancel")}
+              </button>
+              <button
+                disabled={!valid && ranges.length === 0}
+                onClick={apply}
+                className="rounded-lg bg-emerald-600 px-4 py-1.5 font-semibold text-white hover:bg-emerald-500 disabled:opacity-40 text-xs shadow-lg shadow-emerald-950/40 transition-colors"
+              >
+                {ranges.length > 0 ? t("applyParts", { n: ranges.length }) : t("apply")}
+              </button>
+            </div>
           </div>
-        )}
-        {showVideo && playhead != null && (
-          <span className="tabular-nums text-xs text-slate-400">{t("at", { t: fmtTime(playhead) })}</span>
-        )}
-        <label className="flex items-center gap-1.5 text-slate-300">
-          {t("from")}
-          <input
-            value={startText}
-            onChange={(e) => setStartText(e.target.value)}
-            onBlur={(e) => commitText("start", e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && commitText("start", startText)}
-            className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
-          />
-        </label>
-        <label className="flex items-center gap-1.5 text-slate-300">
-          {t("to")}
-          <input
-            value={endText}
-            onChange={(e) => setEndText(e.target.value)}
-            onBlur={(e) => commitText("end", e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && commitText("end", endText)}
-            className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-center tabular-nums font-mono"
-          />
-        </label>
-        {isMultiTrack ? (
-          <button
-            type="button"
-            onClick={() => setAudioDrawerOpen((o) => !o)}
-            className="px-2.5 py-1 rounded-md border border-emerald-700/60 bg-emerald-950/40 text-emerald-300 text-xs font-medium hover:bg-emerald-900/50 flex items-center gap-1"
-          >
-            🎚️ {t("audioTracks")} ({t("tracksSelected", { n: enabledTrackCount })})
-            <span className="text-[10px] font-mono">{audioDrawerOpen ? "▲" : "▼"}</span>
-          </button>
-        ) : (
-          <label className="flex items-center gap-1.5 text-xs text-slate-300">
-            <span>Vol:</span>
-            <input
-              type="range"
-              min="0"
-              max="200"
-              value={singleTrackVol}
-              onChange={(e) => handleSingleTrackVol(Number(e.target.value))}
-              className="w-20 h-1 bg-slate-800 rounded accent-emerald-500"
-            />
-            <span
-              className={`font-mono w-9 ${
-                singleTrackVol > 100 ? "text-amber-400 font-bold" : "text-emerald-400"
-              }`}
-            >
-              {singleTrackVol}%
-            </span>
-          </label>
-        )}
-        <label className="flex items-center gap-1.5 text-slate-300 text-xs" title={t("normalizeTitle")}>
-          <input
-            type="checkbox"
-            checked={file.normalize}
-            onChange={(e) => setNormalize(file.path, e.target.checked)}
-            className="accent-emerald-500"
-          />
-          {t("normalize")}
-        </label>
-        <span className="text-xs text-slate-500">
-          {valid ? t("selected", { t: fmtTime(end - start) }) : t("endAfterStart")}
-        </span>
-
-        {/* Per-Trim Direct Filename Editor for single trim */}
-        {ranges.length === 0 && (
-          <label className="flex items-center gap-1.5 text-xs text-slate-300" title={t("outputFilenamePlaceholder")}>
-            <span className="text-slate-400 font-mono">📁</span>
-            <input
-              type="text"
-              value={singleCustomName}
-              placeholder={outputName(file.path, preset, null, namingPattern, undefined, resolvePreset(preset, customPresets).height)}
-              onChange={(e) => {
-                const val = e.target.value;
-                setSingleCustomName(val);
-                setTrimCustomName(index, 0, val);
-              }}
-              className="w-44 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none font-mono"
-            />
-          </label>
-        )}
-
-        <div className="ml-auto flex gap-2">
-          <button
-            disabled={!valid}
-            onClick={addPart}
-            title={t("addPartTitle")}
-            className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800 disabled:opacity-40 text-xs font-medium"
-          >
-            {t("addPart")}
-          </button>
-          {(ranges.length > 0 || file.trims.length > 0 || file.speedRanges.length > 0) && (
-            <button
-              onClick={clearAll}
-              className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800 text-xs font-medium"
-            >
-              {t("clear")}
-            </button>
-          )}
-          <button
-            onClick={handleClose}
-            className="rounded-lg border border-slate-700 px-3 py-1.5 hover:bg-slate-800 text-xs font-medium"
-          >
-            {t("cancel")}
-          </button>
-          <button
-            disabled={!valid && ranges.length === 0}
-            onClick={apply}
-            className="rounded-lg bg-emerald-600 px-3 py-1.5 font-medium text-white hover:bg-emerald-500 disabled:opacity-40 text-xs"
-          >
-            {ranges.length > 0 ? t("applyParts", { n: ranges.length }) : t("apply")}
-          </button>
         </div>
       </div>
     </div>
