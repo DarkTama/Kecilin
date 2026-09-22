@@ -116,7 +116,7 @@ export interface Engine {
   /** URL usable as <video>/<img> src for a queued source file. */
   mediaSrc(path: string): string;
   /** Small H.264 proxy for undecodable sources; rejects when unsupported. */
-  preparePreviewProxy(path: string, onProgress?: (percent: number) => void): Promise<string>;
+  preparePreviewProxy(path: string, onProgress?: (percent: number) => void, resolution?: number): Promise<string>;
   cancelPreviewProxy?(path: string): Promise<void>;
   prepareThumbnail(path: string, duration: number | null): Promise<Thumb>;
   extractTrackAudio(path: string, index: number): Promise<string>;

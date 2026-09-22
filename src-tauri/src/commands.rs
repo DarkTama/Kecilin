@@ -1136,11 +1136,42 @@ fn cache_file(app: &AppHandle, sub: &str, path: &str, ext: &str) -> Result<PathB
     Ok(dir.join(format!("{:016x}.{ext}", stable_hash(&key))))
 }
 
+/// Cache key for a preview proxy, distinct per source identity and target height
+/// so proxies for different resolutions get distinct cache filenames.
+pub(crate) fn preview_cache_key(path: &str, mtime: u64, size: u64, height: u32) -> String {
+    format!("{path}|{mtime}|{size}|h={height}")
+}
+
+/// Cache file path for a preview proxy keyed by an explicit `key` (see
+/// `preview_cache_key`), rather than the generic `cache_file` key scheme.
+fn preview_cache_file(app: &AppHandle, key: &str, ext: &str) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("previews");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(format!("{:016x}.{ext}", stable_hash(key))))
+}
+
 /// Re-encode a small H.264/AAC proxy or remux so the webview can preview formats it
 /// can't decode natively (HEVC, .mkv, .avi, …).
 #[tauri::command]
-pub async fn prepare_preview(app: AppHandle, path: String) -> Result<String, String> {
-    let out = cache_file(&app, "previews", &path, "mp4")?;
+pub async fn prepare_preview(
+    app: AppHandle,
+    path: String,
+    resolution: Option<u32>,
+) -> Result<String, String> {
+    let target_height = resolution.unwrap_or(360).clamp(240, 1080);
+    let meta = fs::metadata(&path).map_err(|e| format!("cannot read file: {e}"))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let key = preview_cache_key(&path, mtime, meta.len(), target_height);
+    let out = preview_cache_file(&app, &key, "mp4")?;
     let out_str = out.to_str().ok_or("cache path is not valid UTF-8")?.to_string();
     if out.exists() {
         let _ = app.emit(
@@ -1246,7 +1277,7 @@ pub async fn prepare_preview(app: AppHandle, path: String) -> Result<String, Str
             "-map", "0:a?",
             "-sn",
             "-dn",
-            "-vf", "scale=-2:360",
+            "-vf", &format!("scale=-2:{target_height}"),
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", "28",
@@ -2099,6 +2130,18 @@ mod tests {
         let p = builtin_preset("720p").unwrap();
         assert_eq!((p.height, p.crf, p.level.as_str()), (720, 20, "4.1"));
         assert!(builtin_preset("1080p").is_none());
+    }
+
+    #[test]
+    fn test_preview_target_height_clamping() {
+        // Default (no resolution given) falls back to 360.
+        assert_eq!(None::<u32>.unwrap_or(360).clamp(240, 1080), 360);
+        // Values within range pass through unchanged.
+        assert_eq!(Some(720u32).unwrap_or(360).clamp(240, 1080), 720);
+        // Values below the floor clamp up to 240.
+        assert_eq!(Some(100u32).unwrap_or(360).clamp(240, 1080), 240);
+        // Values above the ceiling clamp down to 1080.
+        assert_eq!(Some(4000u32).unwrap_or(360).clamp(240, 1080), 1080);
     }
 
     #[test]
@@ -3137,5 +3180,14 @@ Stream #0:0: Video: h264, yuv420p, 1280x720, 24 fps
         let (v, a) = parse_codecs("");
         assert_eq!(v, None);
         assert_eq!(a, None);
+    }
+
+    #[test]
+    fn test_preview_cache_key_differs_by_resolution() {
+        let key_360 = preview_cache_key("test.mkv", 1000, 2048, 360);
+        let key_720 = preview_cache_key("test.mkv", 1000, 2048, 720);
+        let key_1080 = preview_cache_key("test.mkv", 1000, 2048, 1080);
+        assert_ne!(key_360, key_720);
+        assert_ne!(key_720, key_1080);
     }
 }

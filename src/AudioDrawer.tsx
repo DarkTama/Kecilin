@@ -51,34 +51,26 @@ const WaveformLaneView = memo(function WaveformLaneView({
   );
 });
 
-export function AudioDrawer({
-  file,
-  playhead,
-  onTrackChange,
-}: {
-  file: FileState;
-  playhead: number | null;
-  onTrackChange: (index: number, patch: Partial<TrackInfo>) => void;
-}) {
-  const t = useT();
+export function useAudioWaveforms(
+  filePath: string,
+  trackIndices: number[]
+): { waveforms: Map<number, Float32Array>; loading: boolean } {
   const [waveforms, setWaveforms] = useState<Map<number, Float32Array>>(new Map());
-  const [loading, setLoading] = useState(() => (file.audioTracksInfo?.length ?? 0) > 0);
-
-  const tracks = file.audioTracksInfo ?? [];
+  const [loading, setLoading] = useState(() => trackIndices.length > 0);
 
   useEffect(() => {
     let active = true;
     async function load() {
       setLoading(true);
       const newWaves = new Map<number, Float32Array>();
-      for (const track of tracks) {
+      for (const index of trackIndices) {
         if (!active) return;
         try {
-          const url = await engine.extractTrackAudio(file.path, track.index);
+          const url = await engine.extractTrackAudio(filePath, index);
           if (!active) return;
           const peaks = await generateWaveformData(url, 300);
           if (!active) return;
-          newWaves.set(track.index, peaks);
+          newWaves.set(index, peaks);
         } catch {
           // fallback to empty
         }
@@ -92,12 +84,171 @@ export function AudioDrawer({
     return () => {
       active = false;
     };
-  }, [file.path, tracks.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filePath, trackIndices.join(",")]);
+
+  return { waveforms, loading };
+}
+
+export function AudioRack({
+  file,
+  onTrackChange,
+  horizontal = false,
+  className,
+}: {
+  file: FileState;
+  onTrackChange: (index: number, patch: Partial<TrackInfo>) => void;
+  horizontal?: boolean;
+  className?: string;
+}) {
+  const t = useT();
+  const tracks = file.audioTracksInfo ?? [];
+
+  return (
+    <div className={`rounded-lg border border-slate-800 bg-slate-950/90 p-3 space-y-3 flex flex-col justify-between ${className ?? ""}`}>
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-semibold uppercase tracking-wider text-slate-300">
+          {t("audioTracks")} ({tracks.length})
+        </span>
+      </div>
+
+      <div
+        className={
+          horizontal
+            ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 overflow-y-auto max-h-[220px] p-0.5 custom-scroll"
+            : "space-y-2.5 overflow-y-auto flex-1 max-h-[360px] pr-1 custom-scroll"
+        }
+      >
+        {tracks.map((track) => {
+          const volPct = Math.round(track.volume * 100);
+          const isBoosted = volPct > 100;
+
+          return (
+            <div
+              key={track.index}
+              className={`rounded-lg border p-2.5 space-y-1.5 transition-opacity ${
+                track.enabled
+                  ? "border-slate-800 bg-slate-900/60"
+                  : "border-slate-900 bg-slate-950/40 opacity-40 hover:opacity-80"
+              }`}
+            >
+              <div className="flex items-center justify-between text-xs">
+                <label className="flex items-center gap-2 cursor-pointer font-medium text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={track.enabled}
+                    onChange={(e) => onTrackChange(track.index, { enabled: e.target.checked })}
+                    className="accent-emerald-500 h-3.5 w-3.5 rounded"
+                  />
+                  <span className="font-semibold text-emerald-400">{track.name}</span>
+                </label>
+
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                    <span className={isBoosted ? "text-amber-400 font-bold" : "text-slate-400"}>
+                      {isBoosted ? t("boost") : "Vol"}:
+                    </span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="200"
+                      value={volPct}
+                      disabled={!track.enabled}
+                      onChange={(e) =>
+                        onTrackChange(track.index, { volume: Number(e.target.value) / 100 })
+                      }
+                      className="w-20 h-1 bg-slate-800 rounded cursor-pointer accent-emerald-500"
+                    />
+                    <span
+                      className={`w-10 text-right ${
+                        isBoosted ? "text-amber-400 font-bold" : "text-emerald-400"
+                      }`}
+                    >
+                      {volPct}%
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => onTrackChange(track.index, { muted: !track.muted })}
+                    className={`px-2 py-0.5 rounded text-[10px] border ${
+                      track.muted
+                        ? "border-amber-600/60 bg-amber-950/40 text-amber-300 font-semibold"
+                        : "border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300"
+                    }`}
+                  >
+                    {track.muted ? t("muted") : t("mute")}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function WaveformLanes({
+  file,
+  playhead,
+  waveforms,
+  className,
+}: {
+  file: FileState;
+  playhead: number | null;
+  waveforms?: Map<number, Float32Array>;
+  className?: string;
+}) {
+  const tracks = file.audioTracksInfo ?? [];
+  const trackIndices = tracks.map((track) => track.index);
+  const internalWaves = useAudioWaveforms(file.path, waveforms ? [] : trackIndices);
+  const resolvedWaveforms = waveforms ?? internalWaves.waveforms;
 
   const playheadPct =
     file.duration && playhead != null
       ? Math.max(0, Math.min(100, (playhead / file.duration) * 100))
       : null;
+
+  return (
+    <div className={`space-y-2.5 ${className ?? ""}`}>
+      {tracks.map((track) => {
+        const peaks = resolvedWaveforms.get(track.index);
+        return (
+          <div
+            key={track.index}
+            className="relative h-8 w-full bg-slate-950 rounded border border-slate-800/80 overflow-hidden flex items-center"
+          >
+            <span className="absolute left-1 top-0.5 z-10 px-1 rounded bg-slate-900/80 text-[10px] font-semibold text-emerald-400">
+              {track.name}
+            </span>
+            <WaveformLaneView peaks={peaks} enabled={track.enabled} />
+            {playheadPct != null && (
+              <div
+                className="absolute top-0 bottom-0 w-0.5 bg-cyan-400 shadow-[0_0_4px_#22d3ee]"
+                style={{ left: `${playheadPct}%` }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function AudioDrawer({
+  file,
+  playhead,
+  onTrackChange,
+}: {
+  file: FileState;
+  playhead: number | null;
+  onTrackChange: (index: number, patch: Partial<TrackInfo>) => void;
+}) {
+  const t = useT();
+  const tracks = file.audioTracksInfo ?? [];
+  const trackIndices = tracks.map((track) => track.index);
+  const { waveforms, loading } = useAudioWaveforms(file.path, trackIndices);
 
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-950/90 p-3 space-y-3">
@@ -117,6 +268,10 @@ export function AudioDrawer({
           const peaks = waveforms.get(track.index);
           const volPct = Math.round(track.volume * 100);
           const isBoosted = volPct > 100;
+          const playheadPct =
+            file.duration && playhead != null
+              ? Math.max(0, Math.min(100, (playhead / file.duration) * 100))
+              : null;
 
           return (
             <div

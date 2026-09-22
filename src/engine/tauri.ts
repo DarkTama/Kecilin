@@ -134,7 +134,7 @@ export const tauriEngine: Engine = {
   dragOut: (paths, icon) => void startDrag({ item: paths, icon }),
 
   mediaSrc: (path) => convertFileSrc(path),
-  preparePreviewProxy: async (path, onProgress) => {
+  preparePreviewProxy: async (path, onProgress, resolution) => {
     let unlisten: (() => void) | undefined;
     if (onProgress) {
       unlisten = await listen<{ path: string; percent: number }>("preview-progress", (e) => {
@@ -144,7 +144,7 @@ export const tauriEngine: Engine = {
       });
     }
     try {
-      const p = await invoke<string>("prepare_preview", { path });
+      const p = await invoke<string>("prepare_preview", { path, resolution });
       return convertFileSrc(p);
     } finally {
       if (unlisten) {

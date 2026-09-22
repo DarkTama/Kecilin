@@ -202,6 +202,13 @@ const en = {
   deleteSourceModalTitle: "Move source files to Recycle Bin?",
   deleteSourceModalBody: "Source videos will only be moved to the Recycle Bin after their conversion finishes with 100% success and verified output. Are you sure you want to enable this?",
   confirmEnable: "Enable",
+  theaterMode: "Theater Mode",
+  standardMode: "Standard Mode",
+  previewQuality: "Preview Resolution",
+  previewTranscodeNotice: "Higher resolution increases proxy load time on non-native formats (HEVC/MKV).",
+  fast: "Fast",
+  balanced: "Balanced",
+  highQuality: "High Quality",
 };
 
 export type Key = keyof typeof en;
@@ -404,6 +411,13 @@ const id: Record<Key, string> = {
   deleteSourceModalTitle: "Pindahkan file sumber ke Keranjang Sampah?",
   deleteSourceModalBody: "Video sumber hanya akan dipindahkan ke Keranjang Sampah setelah konversinya selesai dengan sukses 100% dan hasil terverifikasi. Anda yakin ingin mengaktifkannya?",
   confirmEnable: "Aktifkan",
+  theaterMode: "Mode Bioskop",
+  standardMode: "Mode Standar",
+  previewQuality: "Resolusi Pratinjau",
+  previewTranscodeNotice: "Resolusi lebih tinggi menambah waktu proses proksi untuk format non-native (HEVC/MKV).",
+  fast: "Cepat",
+  balanced: "Seimbang",
+  highQuality: "Kualitas Tinggi",
 };
 
 const dict: Record<Lang, Record<Key, string>> = { en, id };
