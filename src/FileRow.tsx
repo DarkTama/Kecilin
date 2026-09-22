@@ -15,8 +15,8 @@ import {
   shouldMutePreview,
 } from "./preview";
 import { resolvePreset, useStore } from "./store";
-import type { AudioOpt, FileState, SpeedRange, Trim } from "./store";
-import { AudioDrawer } from "./AudioDrawer";
+import type { AudioOpt, FileState, SpeedRange, TrackInfo, Trim } from "./store";
+import { AudioRack, WaveformLanes } from "./AudioDrawer";
 import { AudioTrackMixer } from "./audio/mixer";
 
 // Thumbnails are extracted one at a time — each is an ffmpeg spawn.
@@ -314,6 +314,9 @@ function TrimEditor({
     ? file.audioTracksInfo.filter((t) => t.enabled).length
     : 1;
   const [audioDrawerOpen, setAudioDrawerOpen] = useState(false);
+  const [theaterMode, setTheaterMode] = useState(false);
+  const [previewRes, setPreviewRes] = useState<360 | 720 | 1080>(720);
+  const [resMenuOpen, setResMenuOpen] = useState(false);
   const mixerRef = useRef<AudioTrackMixer | null>(null);
   const loadedTracks = useRef<Set<number>>(new Set());
   const mixerSpedPausedRef = useRef(false);
@@ -557,7 +560,7 @@ function TrimEditor({
   const fixedLen =
     lenMode === "30" ? 30 : lenMode === "custom" && customSecs >= 1 ? customSecs : null;
 
-  async function fallbackToProxy() {
+  async function fallbackToProxy(targetRes: 360 | 720 | 1080 = previewRes) {
     if (triedProxy.current) {
       setPreview("none");
       return;
@@ -566,9 +569,13 @@ function TrimEditor({
     setProxyProgress(0);
     setPreview("preparing");
     try {
-      const proxySrc = await engine.preparePreviewProxy(file.path, (pct) => {
-        setProxyProgress(pct);
-      });
+      const proxySrc = await engine.preparePreviewProxy(
+        file.path,
+        (pct) => {
+          setProxyProgress(pct);
+        },
+        targetRes,
+      );
       if (previewRef.current === "preparing") {
         setSrc(proxySrc);
         setPreview("proxy");
@@ -965,120 +972,225 @@ function TrimEditor({
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  function handleTrackChange(idx: number, patch: Partial<TrackInfo>) {
+    if (patch.enabled !== undefined) {
+      setTrackEnabled(file.path, idx, patch.enabled);
+    }
+    if (patch.volume !== undefined) {
+      setTrackVolume(file.path, idx, patch.volume);
+    }
+    if (patch.muted !== undefined) {
+      setTrackMuted(file.path, idx, patch.muted);
+    }
+    if (mixerRef.current) {
+      const currentTrack = (file.audioTracksInfo ?? []).find((t) => t.index === idx);
+      const vol = patch.volume ?? currentTrack?.volume ?? 1;
+      const muted =
+        patch.muted !== undefined
+          ? patch.muted
+          : patch.enabled !== undefined
+            ? !patch.enabled
+            : currentTrack?.muted || !currentTrack?.enabled;
+      mixerRef.current.setTrackVolume(idx, vol, muted);
+    }
+  }
+
+  const resolutionLabel = `${previewRes}p${
+    previewRes === 1080 ? " FHD" : previewRes === 720 ? " HD" : ""
+  }`;
+
+  const liveRateOverlay = liveRate > 1 && (
+    <div className="absolute left-2 top-2 flex flex-col items-start gap-1 z-10">
+      <span className="pointer-events-none rounded-full bg-amber-500/90 px-2 py-0.5 text-xs font-semibold text-slate-950 shadow-lg">
+        ⚡ {liveRate.toFixed(2)}×
+      </span>
+      {previewCapped && (
+        <span className="pointer-events-none rounded bg-slate-950/85 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
+          {t("previewCapped", { max: String(MAX_PREVIEW_RATE) })}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={() => setPreviewMuted((m) => !m)}
+        title={t(previewMuted ? "previewAudioMuted" : "previewAudioOn")}
+        className="rounded bg-slate-950/85 px-1.5 py-0.5 text-[10px] font-medium text-slate-300 hover:text-white"
+      >
+        {previewMuted ? "🔇" : "🔊"}
+      </button>
+    </div>
+  );
+
+  const previewControls = (
+    <div className="absolute right-2 top-2 z-20 flex items-center gap-2">
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setResMenuOpen((o) => !o)}
+          className="rounded border border-slate-700 bg-slate-950/85 px-2 py-1 text-[10px] font-medium text-slate-300 hover:text-white"
+        >
+          {resolutionLabel}
+        </button>
+        {resMenuOpen && (
+          <div className="absolute right-0 top-full z-30 mt-1 w-56 rounded-lg border border-slate-700 bg-slate-900 p-2 shadow-xl">
+            {([360, 720, 1080] as const).map((res) => (
+              <button
+                key={res}
+                type="button"
+                onClick={() => {
+                  setPreviewRes(res);
+                  setResMenuOpen(false);
+                  if (preview === "proxy") {
+                    void fallbackToProxy(res);
+                  }
+                }}
+                className={`flex w-full items-center justify-between rounded px-2 py-1 text-left text-xs ${
+                  previewRes === res
+                    ? "bg-emerald-500/20 text-emerald-300"
+                    : "text-slate-300 hover:bg-slate-800"
+                }`}
+              >
+                <span>
+                  {res}p ({res === 360 ? t("fast") : res === 720 ? t("balanced") : t("highQuality")})
+                  {res === 720 ? " ★" : ""}
+                </span>
+              </button>
+            ))}
+            <p className="mt-1.5 px-2 text-[10px] leading-snug text-slate-500">
+              {t("previewTranscodeNotice")}
+            </p>
+          </div>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={() => setTheaterMode((m) => !m)}
+        className="rounded border border-slate-700 bg-slate-950/85 px-2 py-1 text-[10px] font-medium text-slate-300 hover:text-white"
+      >
+        {theaterMode ? `⛷️ ${t("standardMode")}` : `⛶ ${t("theaterMode")}`}
+      </button>
+    </div>
+  );
+
+  const videoElement = (
+    <video
+      key={src}
+      ref={videoRef}
+      src={src}
+      muted={isMultiTrack ? true : undefined}
+      className="h-full w-full max-h-full object-contain rounded-lg bg-black"
+      onError={() => void fallbackToProxy()}
+      onPlay={() => {
+        setPlaying(true);
+        if (isMultiTrack) {
+          if (videoRef.current) videoRef.current.muted = true;
+          const el = videoRef.current;
+          const { ranges: liveRanges } = rampRef.current;
+          const inSped =
+            speedRampEnabled &&
+            el &&
+            resolvePlaybackRate(el.currentTime, liveRanges, true) !== 1;
+          if (!inSped) {
+            mixerRef.current?.play(el?.currentTime ?? 0);
+            mixerSpedPausedRef.current = false;
+          } else {
+            mixerSpedPausedRef.current = true;
+          }
+        } else {
+          if (singleTrackVol > 100) {
+            setupVideoAudio();
+          }
+          if (videoAudioCtxRef.current?.state === "suspended") {
+            void videoAudioCtxRef.current.resume();
+          }
+        }
+      }}
+      onPause={() => {
+        setPlaying(false);
+        mixerSpedPausedRef.current = false;
+        if (isMultiTrack) {
+          mixerRef.current?.pause();
+        }
+      }}
+      onSeeked={(e) => {
+        if (isMultiTrack) {
+          const { ranges: liveRanges } = rampRef.current;
+          const inSped =
+            speedRampEnabled &&
+            resolvePlaybackRate(e.currentTarget.currentTime, liveRanges, true) !== 1;
+          if (!inSped && !e.currentTarget.paused) {
+            mixerRef.current?.seek(e.currentTarget.currentTime);
+            mixerSpedPausedRef.current = false;
+          } else if (inSped) {
+            mixerRef.current?.pause();
+            mixerSpedPausedRef.current = true;
+          } else {
+            mixerRef.current?.seek(e.currentTarget.currentTime);
+          }
+        }
+      }}
+      onSeeking={(e) => {
+        if (isMultiTrack) {
+          mixerRef.current?.seek(e.currentTarget.currentTime);
+        }
+      }}
+      onLoadedMetadata={(e) => {
+        const v = e.currentTarget;
+        if (isMultiTrack) {
+          v.muted = true;
+        }
+        if (Number.isFinite(v.duration)) {
+          setDuration((d) => d ?? v.duration);
+          if (end <= 0) update(start, v.duration);
+        }
+        // Audio decodes but the video track can't: no error fires and
+        // videoWidth stays 0 — switch to the ffmpeg proxy.
+        if (v.videoWidth === 0) void fallbackToProxy();
+      }}
+      onTimeUpdate={(e) => {
+        const v = e.currentTarget;
+        if (isMultiTrack && !v.muted) {
+          v.muted = true;
+        }
+        setPlayhead(v.currentTime);
+        // Auto-pause when playback crosses the range end (but let seeks
+        // beyond it play freely — "start from the middle" is allowed).
+        // Backstop for the rAF pause: the window can be hidden, which
+        // stops rAF while playback continues. Scale by the live rate.
+        const win = 0.5 * Math.max(1, v.playbackRate);
+        if (!v.paused && v.currentTime >= end && v.currentTime < end + win) v.pause();
+      }}
+    />
+  );
+
   return (
     <div className="flex flex-col gap-3 border-t border-slate-800 px-4 py-4">
-      {showVideo && (
-        <div className="relative">
-          <video
-            key={src}
-            ref={videoRef}
-            src={src}
-            muted={isMultiTrack ? true : undefined}
-            className="max-h-64 w-full rounded-lg bg-black"
-            onError={() => void fallbackToProxy()}
-            onPlay={() => {
-              setPlaying(true);
-              if (isMultiTrack) {
-                if (videoRef.current) videoRef.current.muted = true;
-                const el = videoRef.current;
-                const { ranges: liveRanges } = rampRef.current;
-                const inSped =
-                  speedRampEnabled &&
-                  el &&
-                  resolvePlaybackRate(el.currentTime, liveRanges, true) !== 1;
-                if (!inSped) {
-                  mixerRef.current?.play(el?.currentTime ?? 0);
-                  mixerSpedPausedRef.current = false;
-                } else {
-                  mixerSpedPausedRef.current = true;
-                }
-              } else {
-                if (singleTrackVol > 100) {
-                  setupVideoAudio();
-                }
-                if (videoAudioCtxRef.current?.state === "suspended") {
-                  void videoAudioCtxRef.current.resume();
-                }
-              }
-            }}
-            onPause={() => {
-              setPlaying(false);
-              mixerSpedPausedRef.current = false;
-              if (isMultiTrack) {
-                mixerRef.current?.pause();
-              }
-            }}
-            onSeeked={(e) => {
-              if (isMultiTrack) {
-                const { ranges: liveRanges } = rampRef.current;
-                const inSped =
-                  speedRampEnabled &&
-                  resolvePlaybackRate(e.currentTarget.currentTime, liveRanges, true) !== 1;
-                if (!inSped && !e.currentTarget.paused) {
-                  mixerRef.current?.seek(e.currentTarget.currentTime);
-                  mixerSpedPausedRef.current = false;
-                } else if (inSped) {
-                  mixerRef.current?.pause();
-                  mixerSpedPausedRef.current = true;
-                } else {
-                  mixerRef.current?.seek(e.currentTarget.currentTime);
-                }
-              }
-            }}
-            onSeeking={(e) => {
-              if (isMultiTrack) {
-                mixerRef.current?.seek(e.currentTarget.currentTime);
-              }
-            }}
-            onLoadedMetadata={(e) => {
-              const v = e.currentTarget;
-              if (isMultiTrack) {
-                v.muted = true;
-              }
-              if (Number.isFinite(v.duration)) {
-                setDuration((d) => d ?? v.duration);
-                if (end <= 0) update(start, v.duration);
-              }
-              // Audio decodes but the video track can't: no error fires and
-              // videoWidth stays 0 — switch to the ffmpeg proxy.
-              if (v.videoWidth === 0) void fallbackToProxy();
-            }}
-            onTimeUpdate={(e) => {
-              const v = e.currentTarget;
-              if (isMultiTrack && !v.muted) {
-                v.muted = true;
-              }
-              setPlayhead(v.currentTime);
-              // Auto-pause when playback crosses the range end (but let seeks
-              // beyond it play freely — "start from the middle" is allowed).
-              // Backstop for the rAF pause: the window can be hidden, which
-              // stops rAF while playback continues. Scale by the live rate.
-              const win = 0.5 * Math.max(1, v.playbackRate);
-              if (!v.paused && v.currentTime >= end && v.currentTime < end + win) v.pause();
-            }}
-          />
-          {liveRate > 1 && (
-            <div className="absolute right-2 top-2 flex flex-col items-end gap-1">
-              <span className="pointer-events-none rounded-full bg-amber-500/90 px-2 py-0.5 text-xs font-semibold text-slate-950 shadow-lg">
-                ⚡ {liveRate.toFixed(2)}×
-              </span>
-              {previewCapped && (
-                <span className="pointer-events-none rounded bg-slate-950/85 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
-                  {t("previewCapped", { max: String(MAX_PREVIEW_RATE) })}
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => setPreviewMuted((m) => !m)}
-                title={t(previewMuted ? "previewAudioMuted" : "previewAudioOn")}
-                className="rounded bg-slate-950/85 px-1.5 py-0.5 text-[10px] font-medium text-slate-300 hover:text-white"
-              >
-                {previewMuted ? "🔇" : "🔊"}
-              </button>
+      {showVideo &&
+        (isMultiTrack && audioDrawerOpen ? (
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-stretch transition-all duration-300">
+            <div
+              className={`relative bg-black rounded-xl border border-slate-800 overflow-hidden flex flex-col justify-center items-center ${
+                theaterMode ? "md:col-span-12 h-[380px]" : "md:col-span-8 h-[280px]"
+              }`}
+            >
+              {videoElement}
+              {liveRateOverlay}
+              {previewControls}
             </div>
-          )}
-        </div>
-      )}
+            <div className={`${theaterMode ? "md:col-span-12" : "md:col-span-4 h-[280px]"}`}>
+              <AudioRack file={file} onTrackChange={handleTrackChange} className="h-full" />
+            </div>
+          </div>
+        ) : (
+          <div
+            className={`relative bg-black rounded-xl border border-slate-800 overflow-hidden flex flex-col justify-center items-center ${
+              theaterMode ? "h-[380px]" : "h-[260px]"
+            }`}
+          >
+            {videoElement}
+            {liveRateOverlay}
+            {previewControls}
+          </div>
+        ))}
       {preview === "preparing" && (
         <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
           <div className="flex items-center justify-between gap-2">
@@ -1248,34 +1360,9 @@ function TrimEditor({
         />
       )}
 
-      {/* Expandable Multi-Track Audio Drawer */}
+      {/* Waveform lanes for the multi-track mixer, beneath the timeline */}
       {isMultiTrack && audioDrawerOpen && (
-        <AudioDrawer
-          file={file}
-          playhead={showVideo ? playhead : null}
-          onTrackChange={(idx, patch) => {
-            if (patch.enabled !== undefined) {
-              setTrackEnabled(file.path, idx, patch.enabled);
-            }
-            if (patch.volume !== undefined) {
-              setTrackVolume(file.path, idx, patch.volume);
-            }
-            if (patch.muted !== undefined) {
-              setTrackMuted(file.path, idx, patch.muted);
-            }
-            if (mixerRef.current) {
-              const currentTrack = (file.audioTracksInfo ?? []).find((t) => t.index === idx);
-              const vol = patch.volume ?? currentTrack?.volume ?? 1;
-              const muted =
-                patch.muted !== undefined
-                  ? patch.muted
-                  : patch.enabled !== undefined
-                    ? !patch.enabled
-                    : currentTrack?.muted || !currentTrack?.enabled;
-              mixerRef.current.setTrackVolume(idx, vol, muted);
-            }
-          }}
-        />
+        <WaveformLanes file={file} playhead={showVideo ? playhead : null} className="mt-1" />
       )}
 
       {/* Output preview strip: the rendered result drawn to scale. */}
